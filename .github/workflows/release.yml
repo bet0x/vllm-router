@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: write
+  packages: write
 
 jobs:
   build:
@@ -63,6 +64,13 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Extract version tag
         id: meta
         run: echo "version=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
@@ -76,5 +84,7 @@ jobs:
           tags: |
             barrahome/vllm-router:${{ steps.meta.outputs.version }}
             barrahome/vllm-router:latest
+            ghcr.io/bet0x/vllm-router:${{ steps.meta.outputs.version }}
+            ghcr.io/bet0x/vllm-router:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
