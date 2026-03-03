@@ -1,6 +1,6 @@
 [package]
 name = "vllm_router_rs"
-version = "0.1.10"
+version = "0.2.0"
 edition = "2021"
 authors = ["Alberto Ferrer <albertof@barrahome.org>"]
 repository = "https://github.com/bet0x/vllm-router"
