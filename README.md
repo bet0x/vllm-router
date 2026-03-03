@@ -74,6 +74,7 @@ Detailed guides are in the [`docs/`](docs/) folder:
 
 | Guide | Description |
 |-------|-------------|
+| [Architecture](docs/architecture.md) | When to use the router, separation of concerns with vLLM/LMCache, caching layers |
 | [Configuration](docs/configuration.md) | Full YAML reference, CLI flags, authentication, retries, circuit breakers, tokenizer mapping |
 | [Load Balancing](docs/load-balancing.md) | Policy overview, use-case recommendations, multi-turn routing, per-policy details |
 | [Semantic Routing](docs/semantic-routing.md) | Cluster routing by prompt content with embeddings |
