@@ -88,6 +88,36 @@ cargo run -- --config-file configs/test-semantic-cluster.yaml
 | `power_of_two` | Least loaded of 2 random workers | No | Variable-length requests |
 | `cache_aware` | Worker with most cached prompt prefix | Yes | Repeated prompts, few-shot |
 
+### Policy by use case
+
+| Use case | Recommended policy | Why |
+|----------|--------------------|-----|
+| Multi-turn chat (strict affinity) | `consistent_hash` | Pins each `session_id` / `user_id` to one worker for the lifetime of the session. vLLM's KV cache is preserved across turns. If the worker dies, the next healthy worker in the ring is used automatically. |
+| Multi-turn chat (fault-tolerant) | `cache_aware` | Every turn sends the full conversation history in the request body. The router picks the worker that already has the most of that prefix cached, so vLLM can rebuild the KV cache even after a failure. |
+| Batch inference / one-shot completions | `power_of_two` | No session state needed; picks the least loaded of two random workers, avoiding hot-spots under variable request durations. |
+| Repeated prompts / few-shot templates | `cache_aware` | Maximises KV cache reuse when many requests share a long common prefix (system prompt, few-shot examples). |
+| Simple scaling, homogeneous workers | `round_robin` | Predictable, zero overhead, works well when all workers are equivalent and request durations are similar. |
+| Routing by prompt content (topics / domains) | `consistent_hash` + semantic clusters | Requests are embedded and matched to the nearest cluster centroid; workers within that cluster are then chosen by consistent hash for KV cache affinity. |
+| Multi-tenant API (per-customer isolation) | `consistent_hash` | `x-user-id` or `x-tenant-id` header pins each tenant to a dedicated worker, preventing cross-tenant cache pollution. |
+
+### Multi-turn chat: `consistent_hash` vs `cache_aware`
+
+```
+Turn 1: session-123 → consistent_hash → Worker A  ✓ (KV cache built on A)
+Turn 2: session-123 → sticky map     → Worker A  ✓ (KV cache reused)
+Turn 3: Worker A fails ✗
+Turn 4: session-123 → next in ring   → Worker B  ✓ (KV cache lost, rebuilt from history)
+
+                 vs.
+
+Turn 1: session-123 → cache_aware → Worker A  ✓ (A has no cache yet, routed by load)
+Turn 2: session-123 → cache_aware → Worker A  ✓ (A has 100% prefix match)
+Turn 3: Worker A fails ✗
+Turn 4: session-123 → cache_aware → Worker B  ✓ (full history in body, B rebuilds cache)
+```
+
+**Rule of thumb:** use `consistent_hash` when minimising latency on the first token is critical and your workers are stable. Use `cache_aware` when you need automatic recovery without manual session management.
+
 Session key extraction order for `consistent_hash`:
 1. `x-semantic-cluster-id` (vLLM Semantic Router cluster)
 2. `x-session-id` / `x-user-id` / `x-tenant-id`
