@@ -1,0 +1,95 @@
+# Prefill-Decode Disaggregation routing
+#
+# Splits the two phases of LLM inference across separate worker pools:
+#   - Prefill workers: compute KV cache from the input prompt (GPU compute-bound)
+#   - Decode workers:  generate tokens one by one using the transferred KV cache (memory-bandwidth-bound)
+#
+# vLLM handles KV cache transfer between pools via the NIXL connector (UCX/GDS).
+# The router embeds the selected prefill and decode addresses directly in the
+# vLLM request ID so vLLM knows where to send the KV cache:
+#   ___prefill_addr_<host:port>___decode_addr_<host:port>_<uuid>
+#
+# Multi-turn chat with PD disaggregation
+# ----------------------------------------
+# The KV cache accumulates on the DECODE worker, not the prefill worker.
+# For session affinity you need decode-worker stickiness. Prefill workers
+# are stateless between turns — they only process new tokens each turn.
+#
+#   Turn 1:  any prefill  +  decode D2  →  KV cache built on D2
+#   Turn 2:  any prefill  +  decode D2  →  KV cache reused on D2  ✓
+#   Turn 2:  any prefill  +  decode D1  →  full re-prefill on D1  ✗
+#
+# Recommended policy split:
+#   prefill_policy: power_of_two  — balance load; no cross-turn state
+#   decode_policy:  consistent_hash — pin session to same decode worker
+#
+# If only --policy is set, both pools use the same policy.
+# consistent_hash on both works well in practice (K8s production default).
+#
+# Start (local):
+#   First launch vLLM with NIXL connector on both prefill and decode nodes:
+#     scripts/llama3.1/start_prefill.sh
+#     scripts/llama3.1/start_decode.sh
+#   Then start the router:
+#     cargo run -- --config-file configs/pd-disagg.yaml
+#
+# Start (K8s):
+#   See scripts/k8s/llama3/vllm-router/pd-disagg/ for a full Kubernetes example.
+
+host: "0.0.0.0"
+port: 8090
+log_level: info
+
+mode:
+  type: pd_disaggregation
+
+  # Prefill worker URLs.
+  # Each entry is a single vLLM instance running with kv_role: kv_both and NIXL connector.
+  # For DP-aware mode, set intra_node_data_parallel_size > 1 and the router will
+  # automatically expand each URL into N consecutive ports (base, base+1, ..., base+N-1).
+  prefill_urls:
+    - "http://127.0.0.1:8081"
+    # - "http://127.0.0.1:8082"   # second prefill node
+
+  # Decode worker URLs.
+  # These hold the KV cache between turns — use decode_policy: consistent_hash
+  # so each session always lands on the same decode worker.
+  decode_urls:
+    - "http://127.0.0.1:8083"
+    # - "http://127.0.0.1:8084"   # second decode node
+
+  # Data-parallel size per node.
+  # When > 1, each URL above is expanded into N DP-aware endpoints.
+  # Set to 1 to treat each URL as a single endpoint regardless of vLLM's
+  # internal --data-parallel-size configuration.
+  # Example: intra_node_data_parallel_size: 2 + prefill http://host:8081
+  #   → creates workers at :8081 and :8082
+  intra_node_data_parallel_size: 1
+
+# Policy applied to the prefill pool.
+# Prefill workers are stateless between turns — any load-balancing policy works.
+# power_of_two avoids hot-spots under variable prompt lengths.
+prefill_policy:
+  type: power_of_two
+  load_check_interval_secs: 10
+
+# Policy applied to the decode pool.
+# The KV cache lives here — use consistent_hash to pin each session to the
+# same decode worker and preserve the accumulated context across turns.
+#
+# Session key extraction order (consistent_hash):
+#   1. x-semantic-cluster-id header
+#   2. x-session-id / x-user-id / x-tenant-id header
+#   3. body.session_params.session_id / body.user
+#   4. full body hash (fallback, not sticky)
+decode_policy:
+  type: consistent_hash
+  virtual_nodes: 160
+
+# Note: if your router version does not support separate prefill_policy /
+# decode_policy keys yet, use the single `policy:` key instead — it applies
+# to both pools. consistent_hash is a safe default for production:
+#
+# policy:
+#   type: consistent_hash
+#   virtual_nodes: 160
