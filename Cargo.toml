@@ -2,6 +2,9 @@
 name = "vllm_router_rs"
 version = "0.1.10"
 edition = "2021"
+authors = ["Alberto Ferrer <albertof@barrahome.org>"]
+repository = "https://github.com/bet0x/vllm-router"
+license = "Apache-2.0"
 
 [features]
 default = ["grpc-client"]
@@ -10,9 +13,6 @@ grpc-server = []
 
 [lib]
 name = "vllm_router_rs"
-# Pure Rust library: Just omit crate-type (defaults to rlib)
-# Python/C binding + Rust library: Use ["cdylib", "rlib"]
-crate-type = ["cdylib", "rlib"]
 
 [[bin]]
 name = "vllm-router"
@@ -39,7 +39,6 @@ rand = "0.9.2"
 reqwest = { version = "0.12.8", features = ["stream", "blocking", "json"] }
 futures-util = "0.3"
 futures = "0.3"
-pyo3 = { version = "0.26", features = ["extension-module"] }
 dashmap = "6.1.0"
 http = "1.1.0"
 tokio = { version = "1.42.0", features = ["full"] }

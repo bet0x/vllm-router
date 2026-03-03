@@ -1,7 +1,7 @@
 # Changelog
 
 All notable changes to this fork are documented here.
-Upstream: [vllm-project/router](https://github.com/vllm-project/router)
+Upstream: [vllm-project/router](https://github.com/vllm-project/router) | Fork: [bet0x/vllm-router](https://github.com/bet0x/vllm-router)
 
 ---
 
