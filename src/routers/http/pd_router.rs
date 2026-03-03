@@ -257,19 +257,24 @@ impl PDRouter {
         }
     }
 
-    /// Fetch model_id from a worker's /get_server_info endpoint.
-    /// Returns "unknown" on any failure.
+    /// Fetch model_id from a worker. Tries two endpoints in order:
+    ///   1. /get_server_info  — llm-d / SGLang-based workers
+    ///   2. /v1/models        — standard vLLM (OpenAI-compatible)
+    /// Returns "unknown" if both fail or neither contains a model ID.
     async fn fetch_model_id_from_server(client: &reqwest::Client, url: &str) -> String {
-        let info_url = format!("{}/get_server_info", url.trim_end_matches('/'));
-        match client
+        let base = url.trim_end_matches('/');
+
+        // 1. Try /get_server_info (llm-d / SGLang)
+        let info_url = format!("{}/get_server_info", base);
+        if let Ok(resp) = client
             .get(&info_url)
             .timeout(std::time::Duration::from_secs(5))
             .send()
             .await
         {
-            Ok(resp) if resp.status().is_success() => {
-                match resp.json::<serde_json::Value>().await {
-                    Ok(json) => json
+            if resp.status().is_success() {
+                if let Ok(json) = resp.json::<serde_json::Value>().await {
+                    let model_id = json
                         .get("model_id")
                         .and_then(|v| v.as_str())
                         .filter(|s| !s.is_empty())
@@ -278,13 +283,39 @@ impl PDRouter {
                                 .and_then(|v| v.as_str())
                                 .and_then(|p| p.split('/').next_back())
                         })
-                        .unwrap_or("unknown")
-                        .to_string(),
-                    Err(_) => "unknown".to_string(),
+                        .map(|s| s.to_string());
+                    if let Some(id) = model_id {
+                        return id;
+                    }
                 }
             }
-            _ => "unknown".to_string(),
         }
+
+        // 2. Fall back to /v1/models (standard vLLM)
+        let models_url = format!("{}/v1/models", base);
+        if let Ok(resp) = client
+            .get(&models_url)
+            .timeout(std::time::Duration::from_secs(5))
+            .send()
+            .await
+        {
+            if resp.status().is_success() {
+                if let Ok(json) = resp.json::<serde_json::Value>().await {
+                    if let Some(id) = json
+                        .get("data")
+                        .and_then(|d| d.as_array())
+                        .and_then(|arr| arr.first())
+                        .and_then(|m| m.get("id"))
+                        .and_then(|v| v.as_str())
+                        .filter(|s| !s.is_empty())
+                    {
+                        return id.to_string();
+                    }
+                }
+            }
+        }
+
+        "unknown".to_string()
     }
 
     pub async fn add_prefill_server(
@@ -1892,17 +1923,31 @@ impl RouterTrait for PDRouter {
             }
         };
 
-        // Test prefill server's health_generate
+        // Test prefill and decode server health.
+        // Tries /health_generate first (llm-d workers), falls back to /health (standard vLLM).
         // Extract base URLs if DP-aware format (e.g., http://127.0.0.1:8081@0 → http://127.0.0.1:8081)
         let (prefill_base_url, _) = super::dp_utils::parse_worker_url(prefill.url());
         let (decode_base_url, _) = super::dp_utils::parse_worker_url(decode.url());
 
-        let prefill_url = format!("{}/health_generate", prefill_base_url);
-        let (prefill_result, decode_result) = tokio::join!(
-            self.client.get(&prefill_url).send(),
-            self.client
-                .get(format!("{}/health_generate", decode_base_url))
+        async fn check_health(
+            client: &reqwest::Client,
+            base_url: &str,
+        ) -> Result<reqwest::Response, reqwest::Error> {
+            let r = client
+                .get(format!("{}/health_generate", base_url))
                 .send()
+                .await;
+            match r {
+                Ok(resp) if resp.status() == reqwest::StatusCode::NOT_FOUND => {
+                    client.get(format!("{}/health", base_url)).send().await
+                }
+                other => other,
+            }
+        }
+
+        let (prefill_result, decode_result) = tokio::join!(
+            check_health(&self.client, &prefill_base_url),
+            check_health(&self.client, &decode_base_url)
         );
 
         // Check results

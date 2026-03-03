@@ -332,21 +332,49 @@ impl RouterManager {
             .map(|w| self.worker_to_info("unknown", &w))
     }
 
-    /// Query server info from a worker URL
+    /// Query server info from a worker. Tries two endpoints in order:
+    ///   1. /get_server_info  — llm-d / SGLang-based workers
+    ///   2. /v1/models        — standard vLLM (OpenAI-compatible), synthesises a ServerInfo
     async fn query_server_info(&self, url: &str) -> Result<ServerInfo, String> {
-        let info_url = format!("{}/get_server_info", url.trim_end_matches('/'));
+        let base = url.trim_end_matches('/');
 
-        match self.client.get(&info_url).send().await {
-            Ok(response) => {
-                if response.status().is_success() {
-                    response
-                        .json::<ServerInfo>()
-                        .await
-                        .map_err(|e| format!("Failed to parse server info: {}", e))
-                } else {
-                    Err(format!("Server returned status: {}", response.status()))
-                }
+        // 1. Try /get_server_info (llm-d / SGLang)
+        let info_url = format!("{}/get_server_info", base);
+        if let Ok(response) = self.client.get(&info_url).send().await {
+            if response.status().is_success() {
+                return response
+                    .json::<ServerInfo>()
+                    .await
+                    .map_err(|e| format!("Failed to parse server info: {}", e));
             }
+        }
+
+        // 2. Fall back to /v1/models (standard vLLM)
+        let models_url = format!("{}/v1/models", base);
+        match self.client.get(&models_url).send().await {
+            Ok(response) if response.status().is_success() => {
+                let json = response
+                    .json::<serde_json::Value>()
+                    .await
+                    .map_err(|e| format!("Failed to parse /v1/models response: {}", e))?;
+                let model_id = json
+                    .get("data")
+                    .and_then(|d| d.as_array())
+                    .and_then(|arr| arr.first())
+                    .and_then(|m| m.get("id"))
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                Ok(ServerInfo {
+                    model_id,
+                    model_path: None,
+                    priority: None,
+                    cost: None,
+                    worker_type: None,
+                    tokenizer_path: None,
+                    chat_template: None,
+                })
+            }
+            Ok(response) => Err(format!("Server returned status: {}", response.status())),
             Err(e) => Err(format!("Failed to connect to server: {}", e)),
         }
     }
