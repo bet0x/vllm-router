@@ -26,7 +26,7 @@ FROM ubuntu:24.04
 
 RUN apt-get update && apt-get install -y \
     ca-certificates \
-    libsentencepiece0d \
+    libsentencepiece0 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /app/target/release/vllm-router /usr/local/bin/vllm-router
