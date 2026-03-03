@@ -165,13 +165,29 @@ Two-level cache pipeline on every non-streaming request:
 2. **Semantic** — cosine similarity against stored embeddings (configurable threshold)
 3. **Backend** — on miss, response is stored in both caches
 
-```bash
-cargo run -- \
-    --config-file configs/round-robin.yaml \
-    --semantic-cache-embeddings-url http://localhost:8030 \
-    --semantic-cache-embeddings-model BAAI/bge-small-en-v1.5 \
-    --semantic-cache-threshold 0.95 \
-    --semantic-cache-ttl-secs 300
+Configure via YAML (see `configs/test-semantic-cluster.yaml` for a full example):
+
+```yaml
+host: "0.0.0.0"
+port: 3000
+log_level: info
+
+mode:
+  type: regular
+  worker_urls:
+    - "http://localhost:8010"
+    - "http://localhost:8020"
+
+policy:
+  type: round_robin
+
+semantic_cache:
+  embeddings_url: "http://localhost:8030"
+  embeddings_model: "BAAI/bge-small-en-v1.5"
+  threshold: 0.95          # cosine similarity required for a cache hit
+  max_entries: 256
+  ttl_secs: 300
+  embedding_timeout_ms: 500
 ```
 
 ---
@@ -238,16 +254,86 @@ vllm-router --api-key-validation-urls https://your-auth-server/validate
 
 ### Metrics
 
-Prometheus endpoint at `127.0.0.1:29000` by default.
+Prometheus endpoint at `127.0.0.1:29000` by default. Override in YAML:
 
-```bash
-vllm-router --prometheus-host 0.0.0.0 --prometheus-port 9000
+```yaml
+prometheus_host: "0.0.0.0"
+prometheus_port: 9000
 ```
 
-Key metrics added in this fork:
-- `vllm_router_worker_requests_total{route, worker, routing}` — per-worker counts by routing method
-- `vllm_router_cluster_requests_total{cluster, worker}` — semantic cluster hits
-- `vllm_router_cluster_fallback_total{route}` — cluster misses falling back to policy
+#### Request metrics
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `vllm_router_requests_total` | counter | `route` | Total requests received by the router |
+| `vllm_router_request_duration_seconds` | histogram | `route` | End-to-end request latency |
+| `vllm_router_request_errors_total` | counter | `route`, `error_type` | Requests that returned an error |
+| `vllm_router_retries_total` | counter | `route` | Retry attempts triggered |
+| `vllm_router_retries_exhausted_total` | counter | `route` | Requests that exhausted all retries |
+
+#### Worker metrics
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `vllm_router_active_workers` | gauge | — | Number of registered workers |
+| `vllm_router_worker_health` | gauge | `worker` | Health status per worker (1=healthy, 0=unhealthy) |
+| `vllm_router_worker_load` | gauge | `worker` | Current in-flight request count per worker |
+| `vllm_router_processed_requests_total` | counter | `worker` | Requests completed per worker |
+| `vllm_router_worker_requests_total` | counter | `route`, `worker`, `routing` | Requests forwarded per worker, tagged by routing method (`cluster` or `policy`) |
+| `vllm_router_worker_request_duration_seconds` | histogram | `route`, `worker` | Latency per worker and route |
+
+#### Routing metrics
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `vllm_router_policy_decisions_total` | counter | `policy`, `worker` | Decisions made by each load-balancing policy |
+| `vllm_router_cluster_requests_total` | counter | `cluster`, `worker` | Requests routed via semantic cluster matching |
+| `vllm_router_cluster_fallback_total` | counter | `route` | Requests that fell below the similarity threshold and used the default policy |
+| `vllm_router_cache_hits_total` | counter | — | Exact-match cache hits |
+| `vllm_router_cache_misses_total` | counter | — | Exact-match cache misses |
+| `vllm_router_running_requests` | gauge | `worker` | Running requests per worker (used by `cache_aware` policy) |
+| `vllm_router_tree_size` | gauge | `worker` | Prefix tree size per worker (`cache_aware` policy) |
+| `vllm_router_load_balancing_events_total` | counter | — | Load-balancing override events |
+| `vllm_router_max_load` / `vllm_router_min_load` | gauge | — | Max/min load across all workers |
+
+#### Circuit breaker metrics
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `vllm_router_cb_state` | gauge | `worker` | Circuit breaker state (0=closed, 1=open, 2=half_open) |
+| `vllm_router_cb_state_transitions_total` | counter | `worker` | State transitions per worker |
+| `vllm_router_cb_outcomes_total` | counter | `worker`, `outcome` | Outcomes recorded by the circuit breaker (`success`/`failure`) |
+
+#### PD disaggregation metrics
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `vllm_router_pd_requests_total` | counter | `route` | Total two-stage PD requests |
+| `vllm_router_pd_prefill_requests_total` | counter | `worker` | Requests sent to each prefill worker |
+| `vllm_router_pd_decode_requests_total` | counter | `worker` | Requests sent to each decode worker |
+| `vllm_router_pd_request_duration_seconds` | histogram | `route` | End-to-end duration of PD requests |
+| `vllm_router_pd_errors_total` | counter | `error_type` | PD routing errors |
+| `vllm_router_pd_prefill_errors_total` | counter | `worker` | Prefill stage errors |
+| `vllm_router_pd_decode_errors_total` | counter | `worker` | Decode stage errors |
+| `vllm_router_pd_stream_errors_total` | counter | `worker` | Streaming errors |
+
+#### Service discovery metrics
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `vllm_router_discovery_updates_total` | counter | — | Service discovery update events |
+| `vllm_router_discovery_workers_added` | gauge | — | Workers added in the last discovery update |
+| `vllm_router_discovery_workers_removed` | gauge | — | Workers removed in the last discovery update |
+
+#### Tokenizer metrics
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `vllm_tokenizer_encode_duration_seconds` | histogram | — | Time to encode text to tokens |
+| `vllm_tokenizer_decode_duration_seconds` | histogram | — | Time to decode tokens to text |
+| `vllm_tokenizer_encode_requests_total` | counter | `tokenizer_type` | Encode requests by tokenizer |
+| `vllm_tokenizer_factory_loads_total` | counter | `file_type` | Tokenizer load events |
+| `vllm_tokenizer_vocab_size` | gauge | — | Vocabulary size of the loaded tokenizer |
 
 ### Retries and Circuit Breakers
 
@@ -283,11 +369,6 @@ Splits inference into two phases across separate worker pools:
 vLLM handles the KV cache transfer between pools via the NIXL connector (UCX/GDS). The router embeds both worker addresses in the vLLM request ID so vLLM knows where to send the cache.
 
 ```bash
-# Start vLLM on prefill and decode nodes first (see scripts/llama3.1/)
-./scripts/llama3.1/start_prefill.sh
-./scripts/llama3.1/start_decode.sh
-
-# Then start the router
 cargo run -- --config-file configs/pd-disagg.yaml
 ```
 
@@ -313,21 +394,6 @@ decode_policy:
 ```
 
 For a full Kubernetes example see `scripts/k8s/llama3/vllm-router/pd-disagg/`.
-
-### CLI equivalent
-
-```bash
-cargo run --release -- \
-    --vllm-pd-disaggregation \
-    --prefill http://127.0.0.1:8081 \
-    --prefill http://127.0.0.1:8082 \
-    --decode  http://127.0.0.1:8083 \
-    --decode  http://127.0.0.1:8084 \
-    --prefill-policy power_of_two \
-    --decode-policy  consistent_hash \
-    --host 127.0.0.1 \
-    --port 8090
-```
 
 ---
 
