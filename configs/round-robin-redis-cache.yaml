@@ -1,0 +1,33 @@
+# Round-Robin with Redis-backed response cache
+#
+# Same as round-robin.yaml but uses Redis for the response cache.
+# Multiple router instances pointing to the same Redis share cached responses.
+#
+# Requires: cargo build --release --features redis-cache
+#
+# Start:
+#   vllm-router --config-file configs/round-robin-redis-cache.yaml
+
+host: "0.0.0.0"
+port: 3000
+log_level: info
+
+mode:
+  type: regular
+  worker_urls:
+    - "http://localhost:8010"
+    - "http://localhost:8020"
+
+policy:
+  type: round_robin
+
+cache:
+  backend: redis
+  max_entries: 2048
+  ttl_secs: 120
+  redis:
+    url: "redis://127.0.0.1:6379/0"
+    pool_size: 8
+    key_prefix: "vllm-router:"
+    connection_timeout_ms: 3000
+    command_timeout_ms: 500

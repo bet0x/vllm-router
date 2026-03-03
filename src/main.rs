@@ -692,6 +692,8 @@ impl CliArgs {
             // Cluster routing requires structured config (multiple clusters with examples +
             // workers).  Too complex for flat CLI flags — use a config file instead.
             semantic_cluster: None,
+            // Cache backend config — only configurable via YAML config file.
+            cache: None,
         })
     }
 

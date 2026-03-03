@@ -5,6 +5,25 @@ Upstream: [vllm-project/router](https://github.com/vllm-project/router) | Fork: 
 
 ---
 
+## [0.3.0] — 2026-03-03
+
+### Added
+- **Redis-backed response cache** — optional Redis backend for both exact-match and semantic response caches, enabled via `--features redis-cache` Cargo feature flag
+  - `CacheConfig` YAML section: `cache.backend` (`memory` or `redis`), `cache.max_entries`, `cache.ttl_secs`, `cache.redis.*`
+  - `RedisExactCache` and `RedisSemanticCache` implementations using `deadpool-redis` connection pooling
+  - Graceful degradation: Redis errors/timeouts return cache miss + warn log, never block requests
+  - Shared cache across multiple router instances pointing to the same Redis
+  - Sample config: `configs/round-robin-redis-cache.yaml`
+- **Async cache traits** (`ExactMatchCache`, `SemanticCacheBackend`) for pluggable cache backends
+- **Architecture documentation** (`docs/architecture.md`) — when to use the router, two-level caching diagram, separation of concerns with vLLM/LMCache
+
+### Changed
+- Response cache and semantic cache now use trait objects (`Arc<dyn ExactMatchCache>`, `Arc<dyn SemanticCacheBackend>`) instead of concrete types
+- Cache `max_entries` and `ttl_secs` are now configurable via YAML `cache:` section (previously hardcoded to 1024/60s)
+- `start_test_workers.sh`: updated venv path, removed `--disable-log-requests` flag
+
+---
+
 ## [Unreleased] — fork additions on top of upstream main
 
 ### Added

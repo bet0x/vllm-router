@@ -14,7 +14,7 @@
 
 set -e
 
-VENV="/home/alberto/vllm-dist"
+VENV="/home/alberto/Projects/vllm-dist"
 CHAT_MODEL="RedHatAI/Llama-3.2-1B-Instruct-FP8"
 EMBED_MODEL="BAAI/bge-small-en-v1.5"
 GPU_MEMORY_UTIL=0.3
@@ -41,7 +41,6 @@ vllm serve "$CHAT_MODEL" \
     --host 0.0.0.0 \
     --gpu-memory-utilization $GPU_MEMORY_UTIL \
     --max-model-len $MAX_MODEL_LEN \
-    --disable-log-requests \
     > "$LOG_DIR/worker1.log" 2>&1 &
 WORKER1_PID=$!
 echo "Worker 1 PID: $WORKER1_PID"
@@ -52,7 +51,6 @@ vllm serve "$CHAT_MODEL" \
     --host 0.0.0.0 \
     --gpu-memory-utilization $GPU_MEMORY_UTIL \
     --max-model-len $MAX_MODEL_LEN \
-    --disable-log-requests \
     > "$LOG_DIR/worker2.log" 2>&1 &
 WORKER2_PID=$!
 echo "Worker 2 PID: $WORKER2_PID"
@@ -63,7 +61,6 @@ if $START_EMBED; then
         --port 8030 \
         --host 0.0.0.0 \
         --gpu-memory-utilization 0.1 \
-        --disable-log-requests \
         > "$LOG_DIR/worker3-embed.log" 2>&1 &
     WORKER3_PID=$!
     echo "Worker 3 (embeddings) PID: $WORKER3_PID"

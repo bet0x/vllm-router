@@ -114,6 +114,10 @@ pub struct RouterConfig {
     /// When `None` (the default), cluster-based routing is disabled.
     #[serde(default)]
     pub semantic_cluster: Option<SemanticClusterConfig>,
+    /// Response cache backend configuration.
+    /// When `None` (the default), uses in-memory cache with default settings.
+    #[serde(default)]
+    pub cache: Option<CacheConfig>,
 }
 
 fn default_policy() -> PolicyConfig {
@@ -241,6 +245,93 @@ fn default_semantic_ttl_secs() -> u64 {
     300
 }
 fn default_embedding_timeout_ms() -> u64 {
+    500
+}
+
+/// Response cache backend configuration.
+///
+/// Controls whether the exact-match and semantic response caches use in-memory
+/// storage (default) or Redis.  When absent from the config file, defaults to
+/// in-memory with 1 024 entries and 60 s TTL.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CacheConfig {
+    /// Backend type: `"memory"` (default) or `"redis"`.
+    #[serde(default = "default_cache_backend")]
+    pub backend: CacheBackend,
+    /// Maximum number of exact-match cache entries.  Default: 1024.
+    #[serde(default = "default_cache_max_entries")]
+    pub max_entries: usize,
+    /// Time-to-live for cache entries, in seconds.  Default: 60.
+    #[serde(default = "default_cache_ttl_secs")]
+    pub ttl_secs: u64,
+    /// Redis-specific settings (only used when `backend` is `redis`).
+    #[serde(default)]
+    pub redis: Option<RedisCacheConfig>,
+}
+
+/// Cache backend selection.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum CacheBackend {
+    #[default]
+    Memory,
+    Redis,
+}
+
+/// Redis-specific cache configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RedisCacheConfig {
+    /// Redis connection URL.  Default: `"redis://127.0.0.1:6379/0"`.
+    #[serde(default = "default_redis_url")]
+    pub url: String,
+    /// Connection pool size.  Default: 8.
+    #[serde(default = "default_redis_pool_size")]
+    pub pool_size: usize,
+    /// Key prefix for all cache keys in Redis.  Default: `"vllm-router:"`.
+    #[serde(default = "default_redis_key_prefix")]
+    pub key_prefix: String,
+    /// Timeout in milliseconds for establishing a connection.  Default: 3000.
+    #[serde(default = "default_redis_connection_timeout_ms")]
+    pub connection_timeout_ms: u64,
+    /// Timeout in milliseconds for each Redis command.  Default: 500.
+    #[serde(default = "default_redis_command_timeout_ms")]
+    pub command_timeout_ms: u64,
+}
+
+impl Default for RedisCacheConfig {
+    fn default() -> Self {
+        Self {
+            url: default_redis_url(),
+            pool_size: default_redis_pool_size(),
+            key_prefix: default_redis_key_prefix(),
+            connection_timeout_ms: default_redis_connection_timeout_ms(),
+            command_timeout_ms: default_redis_command_timeout_ms(),
+        }
+    }
+}
+
+fn default_cache_backend() -> CacheBackend {
+    CacheBackend::Memory
+}
+fn default_cache_max_entries() -> usize {
+    1024
+}
+fn default_cache_ttl_secs() -> u64 {
+    60
+}
+fn default_redis_url() -> String {
+    "redis://127.0.0.1:6379/0".to_string()
+}
+fn default_redis_pool_size() -> usize {
+    8
+}
+fn default_redis_key_prefix() -> String {
+    "vllm-router:".to_string()
+}
+fn default_redis_connection_timeout_ms() -> u64 {
+    3000
+}
+fn default_redis_command_timeout_ms() -> u64 {
     500
 }
 
@@ -604,6 +695,7 @@ impl Default for RouterConfig {
             profile_timeout_secs: default_profile_timeout_secs(),
             semantic_cache: None,
             semantic_cluster: None,
+            cache: None,
         }
     }
 }
@@ -1178,6 +1270,7 @@ mod tests {
             profile_timeout_secs: default_profile_timeout_secs(),
             semantic_cache: None,
             semantic_cluster: None,
+            cache: None,
         };
 
         assert!(config.mode.is_pd_mode());
@@ -1248,6 +1341,7 @@ mod tests {
             profile_timeout_secs: default_profile_timeout_secs(),
             semantic_cache: None,
             semantic_cluster: None,
+            cache: None,
         };
 
         assert!(!config.mode.is_pd_mode());
@@ -1314,6 +1408,7 @@ mod tests {
             profile_timeout_secs: default_profile_timeout_secs(),
             semantic_cache: None,
             semantic_cluster: None,
+            cache: None,
         };
 
         assert!(config.has_service_discovery());

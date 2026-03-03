@@ -11,9 +11,12 @@
 //! All mutations are protected by a [`parking_lot::RwLock`]-guarded `Vec`.
 //! Reads (similarity search) take a shared lock; writes take an exclusive lock.
 
+use async_trait::async_trait;
 use bytes::Bytes;
 use parking_lot::RwLock;
 use std::time::{Duration, Instant};
+
+use crate::cache::traits::SemanticCacheBackend;
 
 /// A single entry stored in the semantic cache.
 #[derive(Debug)]
@@ -137,6 +140,21 @@ impl SemanticCache {
     /// Returns `true` if the cache contains no entries.
     pub fn is_empty(&self) -> bool {
         self.entries.read().is_empty()
+    }
+}
+
+#[async_trait]
+impl SemanticCacheBackend for SemanticCache {
+    async fn find_similar(&self, query: &[f32]) -> Option<(Bytes, Option<String>)> {
+        self.find_similar(query)
+    }
+
+    async fn insert(&self, embedding: Vec<f32>, body: Bytes, content_type: Option<String>) {
+        self.insert(embedding, body, content_type);
+    }
+
+    fn threshold(&self) -> f32 {
+        self.threshold
     }
 }
 

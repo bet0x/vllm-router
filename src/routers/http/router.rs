@@ -45,9 +45,9 @@ pub struct Router {
     _worker_loads: Arc<tokio::sync::watch::Receiver<HashMap<String, isize>>>,
     _load_monitor_handle: Option<Arc<tokio::task::JoinHandle<()>>>,
     /// Exact-match response cache for non-streaming requests.
-    response_cache: Arc<crate::cache::ResponseCache>,
+    response_cache: Arc<dyn crate::cache::traits::ExactMatchCache>,
     /// Semantic similarity cache (T-12).  `None` when the feature is disabled.
-    semantic_cache: Option<Arc<crate::cache::semantic::SemanticCache>>,
+    semantic_cache: Option<Arc<dyn crate::cache::traits::SemanticCacheBackend>>,
     /// Base URL of the embeddings endpoint used for semantic caching/cluster routing.
     embeddings_url: Option<String>,
     /// Model name sent in embedding requests.
@@ -238,22 +238,8 @@ impl Router {
             circuit_breaker_config: core_cb_config,
             _worker_loads: worker_loads,
             _load_monitor_handle: load_monitor_handle,
-            // 1 024 entries, 60-second TTL. Only non-streaming responses are stored.
-            response_cache: Arc::new(crate::cache::ResponseCache::new(1024, 60)),
-            // Semantic similarity cache — only enabled when embeddings_url is configured.
-            semantic_cache: ctx
-                .router_config
-                .semantic_cache
-                .as_ref()
-                .and_then(|sc| sc.embeddings_url.as_ref())
-                .map(|_| {
-                    let sc = ctx.router_config.semantic_cache.as_ref().unwrap();
-                    Arc::new(crate::cache::semantic::SemanticCache::new(
-                        sc.max_entries,
-                        sc.ttl_secs,
-                        sc.threshold,
-                    ))
-                }),
+            response_cache: Self::build_exact_cache(&ctx.router_config)?,
+            semantic_cache: Self::build_semantic_cache(&ctx.router_config)?,
             embeddings_url: embeddings_url.clone(),
             embeddings_model: embeddings_model.clone(),
             embedding_timeout_ms,
@@ -367,6 +353,110 @@ impl Router {
         Some(Arc::new(
             crate::policies::SemanticClusterPolicy::from_parts(parts, config.threshold),
         ))
+    }
+
+    /// Build the exact-match response cache from config.
+    ///
+    /// Uses Redis when `cache.backend == redis` and the `redis-cache` feature is
+    /// enabled; otherwise falls back to the in-memory implementation.
+    fn build_exact_cache(
+        config: &crate::config::types::RouterConfig,
+    ) -> Result<Arc<dyn crate::cache::traits::ExactMatchCache>, String> {
+        let (max_entries, ttl_secs, backend) = match &config.cache {
+            Some(cc) => (cc.max_entries, cc.ttl_secs, &cc.backend),
+            None => (1024, 60, &crate::config::types::CacheBackend::Memory),
+        };
+
+        match backend {
+            crate::config::types::CacheBackend::Memory => {
+                info!(max_entries, ttl_secs, "exact-match cache: in-memory");
+                Ok(Arc::new(crate::cache::ResponseCache::new(max_entries, ttl_secs)))
+            }
+            crate::config::types::CacheBackend::Redis => {
+                #[cfg(feature = "redis-cache")]
+                {
+                    let redis_config = config
+                        .cache
+                        .as_ref()
+                        .and_then(|cc| cc.redis.clone())
+                        .unwrap_or_default();
+                    info!(url = %redis_config.url, max_entries, ttl_secs, "exact-match cache: redis");
+                    let cache = crate::cache::redis_backend::RedisExactCache::new(
+                        &redis_config,
+                        max_entries,
+                        ttl_secs,
+                    )?;
+                    Ok(Arc::new(cache))
+                }
+                #[cfg(not(feature = "redis-cache"))]
+                {
+                    Err("cache.backend is 'redis' but the binary was compiled without the 'redis-cache' feature".to_string())
+                }
+            }
+        }
+    }
+
+    /// Build the semantic similarity cache from config.
+    ///
+    /// Returns `None` when no embeddings URL is configured. Uses Redis when
+    /// `cache.backend == redis` and the `redis-cache` feature is enabled.
+    fn build_semantic_cache(
+        config: &crate::config::types::RouterConfig,
+    ) -> Result<Option<Arc<dyn crate::cache::traits::SemanticCacheBackend>>, String> {
+        let sc = match config.semantic_cache.as_ref() {
+            Some(sc) if sc.embeddings_url.is_some() => sc,
+            _ => return Ok(None),
+        };
+
+        let backend = config
+            .cache
+            .as_ref()
+            .map(|cc| &cc.backend)
+            .unwrap_or(&crate::config::types::CacheBackend::Memory);
+
+        match backend {
+            crate::config::types::CacheBackend::Memory => {
+                info!(
+                    max_entries = sc.max_entries,
+                    ttl_secs = sc.ttl_secs,
+                    threshold = sc.threshold,
+                    "semantic cache: in-memory"
+                );
+                Ok(Some(Arc::new(crate::cache::semantic::SemanticCache::new(
+                    sc.max_entries,
+                    sc.ttl_secs,
+                    sc.threshold,
+                ))))
+            }
+            crate::config::types::CacheBackend::Redis => {
+                #[cfg(feature = "redis-cache")]
+                {
+                    let redis_config = config
+                        .cache
+                        .as_ref()
+                        .and_then(|cc| cc.redis.clone())
+                        .unwrap_or_default();
+                    info!(
+                        url = %redis_config.url,
+                        max_entries = sc.max_entries,
+                        ttl_secs = sc.ttl_secs,
+                        threshold = sc.threshold,
+                        "semantic cache: redis"
+                    );
+                    let cache = crate::cache::redis_backend::RedisSemanticCache::new(
+                        &redis_config,
+                        sc.max_entries,
+                        sc.ttl_secs,
+                        sc.threshold,
+                    )?;
+                    Ok(Some(Arc::new(cache)))
+                }
+                #[cfg(not(feature = "redis-cache"))]
+                {
+                    Err("cache.backend is 'redis' but the binary was compiled without the 'redis-cache' feature".to_string())
+                }
+            }
+        }
     }
 
     /// Extract a plain-text representation of the request body for embedding.
@@ -901,7 +991,7 @@ impl Router {
                 let cache_key = crate::cache::ResponseCache::compute_key(&json);
 
                 // 1. Exact-match cache hit — return immediately without touching a worker
-                if let Some((cached_body, ct)) = self.response_cache.get(cache_key) {
+                if let Some((cached_body, ct)) = self.response_cache.get(cache_key).await {
                     let mut resp = Response::new(axum::body::Body::from(cached_body));
                     *resp.status_mut() = StatusCode::OK;
                     if let Some(ct_str) = ct {
@@ -926,8 +1016,8 @@ impl Router {
                 if let (Some(emb), Some(sem_cache)) =
                     (query_embedding.as_ref(), &self.semantic_cache)
                 {
-                    if let Some((cached_body, ct)) = sem_cache.find_similar(emb) {
-                        debug!("Semantic cache hit (similarity ≥ {})", sem_cache.threshold);
+                    if let Some((cached_body, ct)) = sem_cache.find_similar(emb).await {
+                        debug!("Semantic cache hit (similarity ≥ {})", sem_cache.threshold());
                         let mut resp = Response::new(axum::body::Body::from(cached_body));
                         *resp.status_mut() = StatusCode::OK;
                         if let Some(ct_str) = ct {
@@ -993,12 +1083,13 @@ impl Router {
                         Ok(bytes) => {
                             // Store in exact-match cache
                             self.response_cache
-                                .insert(cache_key, bytes.clone(), ct.clone());
+                                .insert(cache_key, bytes.clone(), ct.clone())
+                                .await;
                             // Also store in semantic cache when an embedding is available
                             if let (Some(sem_cache), Some(emb)) =
                                 (&self.semantic_cache, query_embedding)
                             {
-                                sem_cache.insert(emb, bytes.clone(), ct);
+                                sem_cache.insert(emb, bytes.clone(), ct).await;
                             }
                             // Rebuild the response from the buffered bytes
                             let resp =
@@ -2369,7 +2460,7 @@ mod tests {
             circuit_breaker_config: CircuitBreakerConfig::default(),
             _worker_loads: Arc::new(rx),
             _load_monitor_handle: None,
-            response_cache: Arc::new(crate::cache::ResponseCache::new(128, 60)),
+            response_cache: Arc::new(crate::cache::ResponseCache::new(128, 60)) as Arc<dyn crate::cache::traits::ExactMatchCache>,
             semantic_cache: None,
             embeddings_url: None,
             embeddings_model: "default".to_string(),
@@ -2447,7 +2538,7 @@ mod tests {
             circuit_breaker_config: CircuitBreakerConfig::default(),
             _worker_loads: Arc::new(rx),
             _load_monitor_handle: None,
-            response_cache: Arc::new(crate::cache::ResponseCache::new(128, 60)),
+            response_cache: Arc::new(crate::cache::ResponseCache::new(128, 60)) as Arc<dyn crate::cache::traits::ExactMatchCache>,
             semantic_cache: None,
             embeddings_url: None,
             embeddings_model: "default".to_string(),

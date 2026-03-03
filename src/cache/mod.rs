@@ -10,10 +10,17 @@
 //! over capacity, the oldest entries are removed (approximate LRU).
 
 pub mod semantic;
+pub mod traits;
 
+#[cfg(feature = "redis-cache")]
+pub mod redis_backend;
+
+use async_trait::async_trait;
 use bytes::Bytes;
 use dashmap::DashMap;
 use std::time::{Duration, Instant};
+
+use crate::cache::traits::ExactMatchCache;
 
 /// A single cached response entry.
 #[derive(Debug)]
@@ -137,6 +144,21 @@ impl ResponseCache {
             }
             other => other.to_string(),
         }
+    }
+}
+
+#[async_trait]
+impl ExactMatchCache for ResponseCache {
+    async fn get(&self, key: u64) -> Option<(Bytes, Option<String>)> {
+        self.get(key)
+    }
+
+    async fn insert(&self, key: u64, body: Bytes, content_type: Option<String>) {
+        self.insert(key, body, content_type);
+    }
+
+    async fn len(&self) -> usize {
+        self.len()
     }
 }
 
