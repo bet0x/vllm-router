@@ -94,6 +94,7 @@ cargo run -- --config-file configs/test-semantic-cluster.yaml
 |----------|--------------------|-----|
 | Multi-turn chat (strict affinity) | `consistent_hash` | Pins each `session_id` / `user_id` to one worker for the lifetime of the session. vLLM's KV cache is preserved across turns. If the worker dies, the next healthy worker in the ring is used automatically. |
 | Multi-turn chat (fault-tolerant) | `cache_aware` | Every turn sends the full conversation history in the request body. The router picks the worker that already has the most of that prefix cached, so vLLM can rebuild the KV cache even after a failure. |
+| Multi-turn chat with PD disaggregation | `decode_policy: consistent_hash` + `prefill_policy: power_of_two` | KV cache accumulates on the decode worker, not the prefill worker. Pin the decode pool by session; let the prefill pool balance freely. See `configs/pd-disagg.yaml`. |
 | Batch inference / one-shot completions | `power_of_two` | No session state needed; picks the least loaded of two random workers, avoiding hot-spots under variable request durations. |
 | Repeated prompts / few-shot templates | `cache_aware` | Maximises KV cache reuse when many requests share a long common prefix (system prompt, few-shot examples). |
 | Simple scaling, homogeneous workers | `round_robin` | Predictable, zero overhead, works well when all workers are equivalent and request durations are similar. |
