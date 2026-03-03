@@ -457,19 +457,24 @@ impl Router {
         }
     }
 
-    /// Fetch model_id from a worker's /get_server_info endpoint.
-    /// Returns "unknown" if the request fails or the field is absent.
+    /// Fetch model_id from a worker. Tries two endpoints in order:
+    ///   1. /get_server_info  — llm-d / SGLang-based workers
+    ///   2. /v1/models        — standard vLLM (OpenAI-compatible)
+    /// Returns "unknown" if both fail or neither contains a model ID.
     async fn fetch_model_id_from_server(client: &reqwest::Client, url: &str) -> String {
-        let info_url = format!("{}/get_server_info", url.trim_end_matches('/'));
-        match client
+        let base = url.trim_end_matches('/');
+
+        // 1. Try /get_server_info (llm-d / SGLang)
+        let info_url = format!("{}/get_server_info", base);
+        if let Ok(resp) = client
             .get(&info_url)
             .timeout(Duration::from_secs(5))
             .send()
             .await
         {
-            Ok(resp) if resp.status().is_success() => {
-                match resp.json::<serde_json::Value>().await {
-                    Ok(json) => json
+            if resp.status().is_success() {
+                if let Ok(json) = resp.json::<serde_json::Value>().await {
+                    let model_id = json
                         .get("model_id")
                         .and_then(|v| v.as_str())
                         .filter(|s| !s.is_empty())
@@ -478,13 +483,39 @@ impl Router {
                                 .and_then(|v| v.as_str())
                                 .and_then(|p| p.split('/').next_back())
                         })
-                        .unwrap_or("unknown")
-                        .to_string(),
-                    Err(_) => "unknown".to_string(),
+                        .map(|s| s.to_string());
+                    if let Some(id) = model_id {
+                        return id;
+                    }
                 }
             }
-            _ => "unknown".to_string(),
         }
+
+        // 2. Fall back to /v1/models (standard vLLM)
+        let models_url = format!("{}/v1/models", base);
+        if let Ok(resp) = client
+            .get(&models_url)
+            .timeout(Duration::from_secs(5))
+            .send()
+            .await
+        {
+            if resp.status().is_success() {
+                if let Ok(json) = resp.json::<serde_json::Value>().await {
+                    if let Some(id) = json
+                        .get("data")
+                        .and_then(|d| d.as_array())
+                        .and_then(|arr| arr.first())
+                        .and_then(|m| m.get("id"))
+                        .and_then(|v| v.as_str())
+                        .filter(|s| !s.is_empty())
+                    {
+                        return id.to_string();
+                    }
+                }
+            }
+        }
+
+        "unknown".to_string()
     }
 
     /// Get the current list of worker URLs
