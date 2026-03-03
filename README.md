@@ -1,89 +1,250 @@
-# vLLM Router
+# vLLM Router — Extended Fork
 
-A high-performance and light-weight request forwarding system for vLLM large scale deployments, providing advanced load balancing methods and prefill/decode disaggregation support.
+> **Fork of [vllm-project/router](https://github.com/vllm-project/router)**
+> This fork extends the upstream router with response caching, semantic cluster routing, Anthropic API support, and several production-readiness improvements. See [CHANGELOG.md](CHANGELOG.md) for the full list of additions.
 
-### Key Features
+A high-performance, lightweight request forwarding system for vLLM large-scale deployments, providing advanced load balancing, prefill/decode disaggregation, and semantic-aware routing.
 
-- **Core Architecture**: Request routing framework and async processing patterns
-- **Load Balancing**: Multiple algorithms (cache-aware, power of two, consistent hashing, random, round robin)
-- **Prefill-Decode Disaggregation**: Specialized routing for separated processing phases
-- **Service Discovery**: Kubernetes-native worker management and health monitoring
-- **Enterprise Features**: Circuit breakers, retry logic, metrics collection
+---
+
+## What this fork adds
+
+| Feature | Upstream | This fork |
+|---------|----------|-----------|
+| Config file (`--config-file`) | ❌ | ✅ YAML config for all settings |
+| Exact-match response cache | ❌ | ✅ FNV-1a, DashMap, TTL |
+| Semantic similarity cache | ❌ | ✅ Cosine similarity + embeddings endpoint |
+| Semantic cluster routing | ❌ | ✅ Route by prompt content to worker clusters |
+| Anthropic Messages API | ❌ | ✅ `POST /v1/messages` with streaming |
+| Sticky sessions + graceful failover | ❌ | ✅ DashMap TTL + ring walk on failure |
+| vLLM Semantic Router header propagation | ❌ | ✅ `x-semantic-*` headers forwarded to workers |
+| SentencePiece tokenizer | ❌ | ✅ Via system `libsentencepiece` |
+| Model→tokenizer mapping | ❌ | ✅ `--tokenizer-model-map` substring match |
+| `POST /v1/completions` (OpenAI backend) | ❌ | ✅ Proxy + streaming SSE |
+| `POST /v1/embeddings` (OpenAI backend) | ❌ | ✅ Proxy |
+| `POST /v1/rerank` (OpenAI backend) | ❌ | ✅ Proxy |
+| gRPC `SessionParams` / `ModelInfo` proto | ❌ | ✅ In `vllm_scheduler.proto` |
+| Per-routing-decision Prometheus metrics | ❌ | ✅ Worker, cluster, and fallback counters |
+| INFO-level routing logs | ❌ | ✅ Model, worker, method, status, duration |
+
+---
 
 ## Quick Start
 
 ### Prerequisites
 
-**Rust and Cargo:**
 ```bash
-# Install rustup (Rust installer and version manager)
+# Rust
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-
-# Follow the installation prompts, then reload your shell
 source $HOME/.cargo/env
 
-# Verify installation
-rustc --version
-cargo --version
-
-# Install protobuf compiler (on Ubuntu/Debian)
-sudo apt-get update
-sudo apt-get install -y protobuf-compiler libprotobuf-dev
+# System deps (Ubuntu/Debian)
+sudo apt-get install -y protobuf-compiler libprotobuf-dev libsentencepiece-dev
 ```
 
-**Python with pip installed**
+### Build
 
-### Installation & Basic Usage
-
-#### Rust Binary
 ```bash
-# Build Rust components
 cargo build --release
 ```
 
-#### Python Package
-Install from PyPI
+### Run with a config file
+
+The easiest way to start the router is with a YAML config file. Sample configs for every policy are in `configs/`:
+
 ```bash
-pip install vllm-router                                                                                                                                                        ```
+# Round-robin across two workers
+cargo run -- --config-file configs/round-robin.yaml
 
-To build from source:
-```bash    
-pip install setuptools-rust wheel build
-python -m build
-pip install dist/*.whl
+# Cache-aware routing (reduces TTFT by reusing vLLM's KV cache)
+cargo run -- --config-file configs/cache-aware.yaml
 
-# Rebuild & reinstall in one step during development
-python -m build && pip install --force-reinstall dist/*.whl
+# Session affinity (same user always goes to same worker)
+cargo run -- --config-file configs/consistent-hash.yaml
+
+# Semantic cluster routing (routes by prompt content)
+cargo run -- --config-file configs/test-semantic-cluster.yaml
 ```
 
-### Usage Examples
+### Run with CLI flags
 
-#### Standard Data Parallelism Routing
 ```bash
-# Launch router with data parallelism (8 replicas per worker URL)
-# When data-parallel-size > 1, the router automatically creates DP-aware workers
 ./target/release/vllm-router \
     --worker-urls http://worker1:8000 http://worker2:8000 \
     --policy consistent_hash \
-    --intra-node-data-parallel-size 8
-
-# Alternative: using cargo run
-cargo run --release -- \
-    --worker-urls http://worker1:8000 http://worker2:8000 \
-    --policy consistent_hash \
-    --intra-node-data-parallel-size 8
-
-# Alternative: using python launcher
-vllm-router \
-  --worker-urls http://worker1:8000 http://worker2:8000 \
-    --policy consistent_hash \
-    --intra-node-data-parallel-size 8
+    --host 0.0.0.0 \
+    --port 3000
 ```
 
-#### Prefill-Decode Disaggregation
+---
+
+## Load Balancing Policies
+
+| Policy | Description | Session Affinity | Best For |
+|--------|-------------|-----------------|----------|
+| `round_robin` | Strict sequential rotation | No | Uniform workloads |
+| `random` | Random worker per request | No | Simple deployments |
+| `consistent_hash` | Same session → same worker | Yes | Multi-turn chat |
+| `power_of_two` | Least loaded of 2 random workers | No | Variable-length requests |
+| `cache_aware` | Worker with most cached prompt prefix | Yes | Repeated prompts, few-shot |
+
+Session key extraction order for `consistent_hash`:
+1. `x-semantic-cluster-id` (vLLM Semantic Router cluster)
+2. `x-session-id` / `x-user-id` / `x-tenant-id`
+3. `body.session_params.session_id` / `body.user`
+4. Full body hash (not sticky)
+
+---
+
+## Semantic Cluster Routing
+
+Routes requests to the worker cluster whose centroid is most similar to the request embedding. Cluster centroids are computed at startup from example prompts.
+
+```yaml
+# configs/test-semantic-cluster.yaml (excerpt)
+policy:
+  type: consistent_hash
+
+semantic_cluster:
+  embeddings_url: "http://localhost:8030"
+  embeddings_model: "BAAI/bge-small-en-v1.5"
+  threshold: 0.70
+  clusters:
+    - name: coding
+      examples:
+        - "Write a Python function to sort a list"
+        - "Debug this Rust borrow checker error"
+      workers:
+        - "http://localhost:8010"
+    - name: general
+      examples:
+        - "What is the capital of France?"
+        - "Explain quantum entanglement"
+      workers:
+        - "http://localhost:8020"
+```
+
+---
+
+## Response Caching
+
+Two-level cache pipeline on every non-streaming request:
+
+1. **Exact-match** — FNV-1a hash of canonical JSON (strips `stream`/`user`/`request_id`)
+2. **Semantic** — cosine similarity against stored embeddings (configurable threshold)
+3. **Backend** — on miss, response is stored in both caches
+
 ```bash
-# When vLLM runs the NIXL connector, prefill/decode URLs are required.
-# See a working example in scripts/llama3.1/ folder.
+cargo run -- \
+    --config-file configs/round-robin.yaml \
+    --semantic-cache-embeddings-url http://localhost:8030 \
+    --semantic-cache-embeddings-model BAAI/bge-small-en-v1.5 \
+    --semantic-cache-threshold 0.95 \
+    --semantic-cache-ttl-secs 300
+```
+
+---
+
+## Anthropic Messages API
+
+The router natively accepts the Anthropic Messages API format and translates it internally to OpenAI Chat Completions:
+
+```bash
+curl http://localhost:3000/v1/messages \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "my-model",
+    "max_tokens": 1024,
+    "messages": [{"role": "user", "content": "Hello!"}]
+  }'
+```
+
+Streaming is fully supported. The response follows the Anthropic SSE event format (`message_start`, `content_block_delta`, `message_stop`).
+
+---
+
+## Configuration Reference
+
+### Full YAML config structure
+
+```yaml
+host: "0.0.0.0"
+port: 3000
+log_level: info          # trace | debug | info | warn | error
+
+mode:
+  type: regular          # regular | pd_disaggregation | igw
+  worker_urls:
+    - "http://worker1:8000"
+    - "http://worker2:8000"
+
+policy:
+  type: consistent_hash  # round_robin | random | consistent_hash | power_of_two | cache_aware
+  virtual_nodes: 160     # consistent_hash only
+
+semantic_cluster:        # optional
+  embeddings_url: "http://embeddings:8030"
+  embeddings_model: "BAAI/bge-small-en-v1.5"
+  threshold: 0.70
+  embedding_timeout_ms: 2000
+  clusters:
+    - name: my-cluster
+      examples: ["example prompt 1", "example prompt 2"]
+      workers: ["http://worker1:8000"]
+```
+
+See individual files in `configs/` for per-policy documentation.
+
+### Authentication
+
+```bash
+# .env
+API_KEY_VALIDATION_URLS=https://your-auth-server/validate
+
+# or CLI
+vllm-router --api-key-validation-urls https://your-auth-server/validate
+```
+
+### Metrics
+
+Prometheus endpoint at `127.0.0.1:29000` by default.
+
+```bash
+vllm-router --prometheus-host 0.0.0.0 --prometheus-port 9000
+```
+
+Key metrics added in this fork:
+- `vllm_router_worker_requests_total{route, worker, routing}` — per-worker counts by routing method
+- `vllm_router_cluster_requests_total{cluster, worker}` — semantic cluster hits
+- `vllm_router_cluster_fallback_total{route}` — cluster misses falling back to policy
+
+### Retries and Circuit Breakers
+
+```bash
+vllm-router \
+  --retry-max-retries 3 \
+  --retry-initial-backoff-ms 100 \
+  --retry-max-backoff-ms 10000 \
+  --cb-failure-threshold 5 \
+  --cb-success-threshold 2 \
+  --cb-timeout-duration-secs 30
+```
+
+### Tokenizer mapping
+
+```bash
+vllm-router \
+  --tokenizer-model-map "llama=meta-llama/Llama-3.2-1B" \
+  --tokenizer-model-map "mistral=mistral-community/Mistral-7B-v0.1"
+```
+
+Supports: `tiktoken`, `tiktoken:<model>`, local `.model` (SentencePiece), or HuggingFace model ID.
+
+---
+
+## Prefill-Decode Disaggregation
+
+```bash
 cargo run --release -- \
     --policy consistent_hash \
     --vllm-pd-disaggregation \
@@ -91,128 +252,13 @@ cargo run --release -- \
     --prefill http://127.0.0.1:8082 \
     --decode http://127.0.0.1:8083 \
     --decode http://127.0.0.1:8084 \
-    --decode http://127.0.0.1:8085 \
-    --decode http://127.0.0.1:8086 \
     --host 127.0.0.1 \
-    --port 8090 \
-    --intra-node-data-parallel-size 1 \
-
-
-# When vLLM runs the NCCL connector, ZMQ based discovery is supported.
-# See a working example in scripts/install.sh
-cargo run --release -- \
-    --policy consistent_hash \
-    --vllm-pd-disaggregation \
-    --vllm-discovery-address 0.0.0.0:30001 \
-    --host 0.0.0.0 \
-    --port 10001 \
-    --prefill-policy consistent_hash \
-    --decode-policy consistent_hash
+    --port 8090
 ```
 
-## Configuration
+---
 
-### Authentication
-
-Enable bearer-token validation by listing validation URLs (comma-separated) in `.env` via `API_KEY_VALIDATION_URLS` or passing `--api-key-validation-urls`.
-When set, all HTTP endpoints require `Authorization: Bearer <token>` and tokens are validated with HTTP 200 responses.
-
-```bash
-# .env
-API_KEY_VALIDATION_URLS=https://codebase.helmholtz.cloud/api/v4/user
-
-# CLI override
-vllm-router --api-key-validation-urls https://codebase.helmholtz.cloud/api/v4/user
-```
-
-### Metrics
-
-Prometheus metrics endpoint available at `127.0.0.1:29000` by default.
-
-```bash
-# Custom metrics configuration
-vllm-router \
-    --worker-urls http://localhost:8080 http://localhost:8081 \
-    --prometheus-host 0.0.0.0 \
-    --prometheus-port 9000
-```
-
-### Retries and Circuit Breakers
-
-#### Retry Configuration
-Retries are enabled by default with exponential backoff and jitter:
-
-```bash
-vllm-router \
-  --worker-urls http://localhost:8080 http://localhost:8081 \
-  --retry-max-retries 3 \
-  --retry-initial-backoff-ms 100 \
-  --retry-max-backoff-ms 10000 \
-  --retry-backoff-multiplier 2.0 \
-  --retry-jitter-factor 0.1
-```
-
-#### Circuit Breaker Configuration
-Circuit breakers protect workers and provide automatic recovery:
-
-```bash
-vllm-router \
-  --worker-urls http://localhost:8080 http://localhost:8081 \
-  --cb-failure-threshold 5 \
-  --cb-success-threshold 2 \
-  --cb-timeout-duration-secs 30 \
-  --cb-window-duration-secs 60
-```
-
-**Circuit Breaker State Machine:**
-- `Closed` → `Open` after N consecutive failures (failure-threshold)
-- `Open` → `HalfOpen` after timeout (timeout-duration-secs)
-- `HalfOpen` → `Closed` after M consecutive successes (success-threshold)
-
-**Retry Policy:** Retries on HTTP status codes 408/429/500/502/503/504, with backoff/jitter between attempts.
-
-### Request ID Tracking
-
-Track requests across distributed systems with configurable headers:
-
-```bash
-# Use custom request ID headers
-vllm-router \
-    --worker-urls http://localhost:8080 \
-    --request-id-headers x-trace-id x-request-id
-```
-
-**Default headers:** `x-request-id`, `x-correlation-id`, `x-trace-id`, `request-id`
-
-### Load Balancing Policies
-
-The router supports multiple load balancing policies:
-
-| Policy | Description | Session Affinity | Use Case |
-|--------|-------------|------------------|----------|
-| `round_robin` | Sequential distribution across workers | No | General purpose, even distribution |
-| `random` | Uniform random selection | No | Simple deployments |
-| `consistent_hash` | Routes same session/user to same worker | Yes | Multi-turn chat, KV cache reuse |
-| `power_of_two` | Picks least loaded of two random workers | No | Load-sensitive workloads |
-| `cache_aware` | Optimizes for prefix cache hits | Yes | Repeated prompts, few-shot |
-
-```bash
-# Example: Using consistent_hash with HTTP header for session affinity
-curl -X POST http://router:8000/v1/chat/completions \
-  -H "X-Session-ID: my-session-123" \
-  -H "Content-Type: application/json" \
-  -d '{"model": "llama-3", "messages": [{"role": "user", "content": "Hello!"}]}'
-```
-
-For detailed configuration options, hash key priorities, and usage examples, see [Load Balancing Documentation](docs/load_balancing/README.md).
-
-## Advanced Features
-
-### Kubernetes Service Discovery
-
-Automatic worker discovery and management in Kubernetes environments.
-
-#### Basic Service Discovery
+## Kubernetes Service Discovery
 
 ```bash
 vllm-router \
@@ -221,42 +267,24 @@ vllm-router \
     --service-discovery-namespace default
 ```
 
-### Command Line Arguments Reference
-
-#### Service Discovery
-- `--service-discovery`: Enable Kubernetes service discovery
-- `--service-discovery-port`: Port for worker URLs (default: 8000)
-- `--service-discovery-namespace`: Kubernetes namespace to watch
-- `--selector`: Label selectors for regular mode (format: `key1=value1 key2=value2`)
+---
 
 ## Development
 
-### Troubleshooting
+```bash
+# Run all tests
+cargo test --lib
 
-**VSCode Rust Analyzer Issues:**
-Set `rust-analyzer.linkedProjects` to the absolute path of `Cargo.toml`:
+# Lint (requires nightly)
+cargo +nightly clippy -- -D warnings
 
-```json
-{
-  "rust-analyzer.linkedProjects": ["/workspaces/vllm/vllm-router/Cargo.toml"]
-}
+# Start local test workers (requires vLLM)
+./scripts/start_test_workers.sh         # chat workers on :8010 and :8020
+./scripts/start_test_workers.sh --all   # + BAAI/bge-small-en-v1.5 embeddings on :8030
 ```
 
-### CI/CD Pipeline
+---
 
-The continuous integration pipeline includes comprehensive testing, benchmarking, and publishing:
+## Acknowledgements
 
-#### Build & Test
-1. **Build Wheels**: Uses `cibuildwheel` for manylinux x86_64 packages
-2. **Build Source Distribution**: Creates source distribution for pip fallback
-3. **Rust HTTP Server Benchmarking**: Performance testing of router overhead
-4. **Basic Inference Testing**: End-to-end validation through the router
-5. **PD Disaggregation Testing**: Benchmark and sanity checks for prefill-decode load balancing
-
-#### Publishing
-- **PyPI Publishing**: Wheels and source distributions published when version changes in `pyproject.toml`
-- **Container Images**: Docker images published using `/docker/Dockerfile.router`
-
-## Acknowledgement
-
-This project is a fork of [SGLang Model Gateway](https://github.com/sgl-project/sglang/tree/main/sgl-model-gateway), and we would like to explicitly acknowledge and thank the original authors for their work. At this stage, our fork includes only minimal changes to preserve the existing interface and ensure compatibility with vLLM. We anticipate further divergence as we pursue the roadmap we have in mind, which is the reason for creating the fork.
+This project is a fork of [vllm-project/router](https://github.com/vllm-project/router), which is itself a fork of [SGLang Model Gateway](https://github.com/sgl-project/sglang/tree/main/sgl-model-gateway). We thank the original authors for their work.

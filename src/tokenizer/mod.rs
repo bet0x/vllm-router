@@ -18,6 +18,8 @@ pub mod huggingface;
 
 pub mod tiktoken;
 
+pub mod sentencepiece;
+
 #[cfg(test)]
 mod tests;
 
@@ -36,6 +38,8 @@ pub use huggingface::HuggingFaceTokenizer;
 pub use chat_template::ChatMessage;
 
 pub use tiktoken::{TiktokenModel, TiktokenTokenizer};
+
+pub use sentencepiece::SentencePieceTokenizer;
 
 /// Main tokenizer wrapper that provides a unified interface for different tokenizer implementations
 #[derive(Clone)]

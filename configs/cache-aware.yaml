@@ -1,0 +1,50 @@
+# Cache-Aware routing (KV-cache prefix tree)
+#
+# Routes requests to the worker that already has the longest cached prefix
+# of the prompt. Reduces TTFT (time-to-first-token) by reusing vLLM's KV cache.
+# Ideal for chatbots with long conversations or prompts sharing a common prefix.
+#
+# How it works:
+#   1. Maintains a prefix tree per worker tracking seen tokens.
+#   2. For each request, computes the cached prefix ratio for each worker.
+#   3. If any worker exceeds cache_threshold → chooses it (cache hit).
+#   4. If none exceeds the threshold → picks the least loaded worker
+#      (respecting balance_abs_threshold and balance_rel_threshold).
+#
+# Start:
+#   cargo run -- --config-file configs/cache-aware.yaml
+
+host: "0.0.0.0"
+port: 3000
+log_level: info
+
+mode:
+  type: regular
+  worker_urls:
+    - "http://localhost:8010"
+    - "http://localhost:8020"
+
+policy:
+  type: cache_aware
+
+  # Minimum cached prefix ratio [0.0–1.0] to prefer a worker.
+  # 0.5 = at least 50% of the prompt is already cached on that worker.
+  # Lower → more cache hits but less load balancing.
+  # Higher → more load balancing but less cache reuse.
+  cache_threshold: 0.5
+
+  # Absolute difference in active requests between workers to force balancing.
+  # If worker_A has 50 reqs and worker_B has 10, the difference is 40.
+  # With balance_abs_threshold=32 → balances even if there's a cache hit on worker_A.
+  balance_abs_threshold: 32
+
+  # Relative load ratio to force balancing (must be >= 1.0).
+  # 1.1 = if a worker has >10% more load than another → balance.
+  balance_rel_threshold: 1.1
+
+  # How often (in seconds) to prune the prefix tree (LRU eviction).
+  eviction_interval_secs: 30
+
+  # Maximum number of nodes in the prefix tree per worker.
+  # Increase for very long conversations or many concurrent users.
+  max_tree_size: 10000

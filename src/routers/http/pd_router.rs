@@ -257,6 +257,36 @@ impl PDRouter {
         }
     }
 
+    /// Fetch model_id from a worker's /get_server_info endpoint.
+    /// Returns "unknown" on any failure.
+    async fn fetch_model_id_from_server(client: &reqwest::Client, url: &str) -> String {
+        let info_url = format!("{}/get_server_info", url.trim_end_matches('/'));
+        match client
+            .get(&info_url)
+            .timeout(std::time::Duration::from_secs(5))
+            .send()
+            .await
+        {
+            Ok(resp) if resp.status().is_success() => {
+                match resp.json::<serde_json::Value>().await {
+                    Ok(json) => json
+                        .get("model_id")
+                        .and_then(|v| v.as_str())
+                        .filter(|s| !s.is_empty())
+                        .or_else(|| {
+                            json.get("model_path")
+                                .and_then(|v| v.as_str())
+                                .and_then(|p| p.split('/').next_back())
+                        })
+                        .unwrap_or("unknown")
+                        .to_string(),
+                    Err(_) => "unknown".to_string(),
+                }
+            }
+            _ => "unknown".to_string(),
+        }
+    }
+
     pub async fn add_prefill_server(
         &self,
         url: String,
@@ -270,11 +300,14 @@ impl PDRouter {
             return Err(PDRouterError::WorkerAlreadyExists { url: url.clone() });
         }
 
-        // Create Worker for the new prefill server with circuit breaker configuration
-        // TODO: In IGW mode, fetch model_id from worker's /get_model_info endpoint
-        let worker = WorkerFactory::create_prefill_with_config(
+        // Create Worker for the new prefill server; fetch model_id from the worker.
+        let model_id = Self::fetch_model_id_from_server(&self.client, &url).await;
+        let mut labels = std::collections::HashMap::new();
+        labels.insert("model_id".to_string(), model_id);
+        let worker = WorkerFactory::create_prefill_with_labels(
             url.clone(),
             bootstrap_port,
+            labels,
             self.circuit_breaker_config.clone(),
         );
 
@@ -311,10 +344,13 @@ impl PDRouter {
             return Err(PDRouterError::WorkerAlreadyExists { url: url.clone() });
         }
 
-        // Create Worker for the new decode server with circuit breaker configuration
-        // TODO: In IGW mode, fetch model_id from worker's /get_model_info endpoint
-        let worker = WorkerFactory::create_decode_with_config(
+        // Create Worker for the new decode server; fetch model_id from the worker.
+        let model_id = Self::fetch_model_id_from_server(&self.client, &url).await;
+        let mut labels = std::collections::HashMap::new();
+        labels.insert("model_id".to_string(), model_id);
+        let worker = WorkerFactory::create_decode_with_labels(
             url.clone(),
+            labels,
             self.circuit_breaker_config.clone(),
         );
 

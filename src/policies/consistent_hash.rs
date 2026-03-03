@@ -6,7 +6,9 @@
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
+use std::time::{Duration, Instant};
 
+use dashmap::DashMap;
 use tracing::debug;
 use tracing::info;
 
@@ -19,16 +21,23 @@ use crate::metrics::RouterMetrics;
 /// Number of virtual nodes per physical worker (for better load distribution)
 const VIRTUAL_NODES_PER_WORKER: u32 = 160;
 
+/// How long a sticky session mapping is kept without activity before being evicted
+const SESSION_TTL: Duration = Duration::from_secs(30 * 60); // 30 minutes
+
 /// Consistent hashing policy
 ///
 /// Routes requests based on session ID or user ID using consistent hashing,
 /// ensuring that requests from the same user/session consistently go to the same worker.
+/// Adds a sticky session map so that an explicit session_id always lands on the same
+/// worker as long as that worker is healthy (falls back to ring walk if not).
 #[derive(Debug)]
 pub struct ConsistentHashPolicy {
     /// Hash ring mapping hash values to worker URLs
     hash_ring: RwLock<BTreeMap<u64, String>>,
     /// Current set of workers (for detecting changes)
     current_workers: RwLock<Vec<String>>,
+    /// Sticky session map: session_id -> (worker_url, last_seen)
+    session_map: DashMap<String, (String, Instant)>,
 }
 
 impl ConsistentHashPolicy {
@@ -36,7 +45,45 @@ impl ConsistentHashPolicy {
         Self {
             hash_ring: RwLock::new(BTreeMap::new()),
             current_workers: RwLock::new(Vec::new()),
+            session_map: DashMap::new(),
         }
+    }
+
+    /// Evict session entries that have exceeded SESSION_TTL.
+    /// Called opportunistically on each request to avoid unbounded growth.
+    fn evict_expired_sessions(&self) {
+        let now = Instant::now();
+        self.session_map
+            .retain(|_, (_, last_seen)| now.duration_since(*last_seen) < SESSION_TTL);
+    }
+
+    /// Look up the sticky session map and return the pinned worker URL if it is
+    /// still healthy. Returns None if no entry exists or the worker is down.
+    fn get_sticky_worker(
+        &self,
+        session_id: &str,
+        workers: &[Arc<dyn Worker>],
+    ) -> Option<usize> {
+        let entry = self.session_map.get(session_id)?;
+        let (pinned_url, _) = entry.value();
+
+        let idx = workers.iter().position(|w| {
+            let (base, _) = self.extract_dp_info(w.url());
+            let (pinned_base, _) = self.extract_dp_info(pinned_url);
+            base == pinned_base
+        })?;
+
+        if workers[idx].is_healthy() && workers[idx].circuit_breaker().can_execute() {
+            Some(idx)
+        } else {
+            None
+        }
+    }
+
+    /// Pin a session_id to the worker at `idx`, refreshing its last-seen timestamp.
+    fn pin_session(&self, session_id: &str, worker_url: &str) {
+        self.session_map
+            .insert(session_id.to_string(), (worker_url.to_string(), Instant::now()));
     }
 
     /// MurmurHash64A implementation from Facebook's mcrouter/lib/fbi/hash.c
@@ -312,8 +359,58 @@ impl ConsistentHashPolicy {
         selected_worker
     }
 
-    /// HTTP header names to check for session ID (case-insensitive, checked in order)
+    /// Walk the ring starting from hash_key's position and return the URL of the
+    /// first worker that is healthy and has an open circuit breaker.
+    /// Preserves as much affinity as possible when the primary worker is down.
+    fn find_next_healthy_in_ring(
+        &self,
+        hash_key: &str,
+        workers: &[Arc<dyn Worker>],
+    ) -> Option<String> {
+        let hash_value = Self::fbi_hash(hash_key);
+        let ring = self.hash_ring.read().unwrap();
+        if ring.is_empty() {
+            return None;
+        }
+
+        // Build a set of healthy worker base URLs for fast lookup
+        let healthy_urls: std::collections::HashSet<String> = workers
+            .iter()
+            .filter(|w| w.is_healthy() && w.circuit_breaker().can_execute())
+            .map(|w| {
+                let (base, _) = self.extract_dp_info(w.url());
+                base
+            })
+            .collect();
+
+        if healthy_urls.is_empty() {
+            return None;
+        }
+
+        // Walk ring from hash position (wrapping around) and return first healthy URL
+        let from_hash = ring.range(hash_value..).map(|(_, u)| u);
+        let wrapped = ring.values();
+
+        for url in from_hash.chain(wrapped) {
+            let (base, _) = self.extract_dp_info(url);
+            if healthy_urls.contains(&base) {
+                return Some(url.clone());
+            }
+        }
+
+        None
+    }
+
+    /// HTTP header names to check for session ID (case-insensitive, checked in order).
+    ///
+    /// `x-semantic-cluster-id` is listed first so that the vLLM Semantic Router's
+    /// cluster assignment takes highest priority for worker affinity.  If the
+    /// Semantic Router has already decided which cluster/worker a request belongs to,
+    /// consistent hashing should respect that decision.
     const SESSION_HEADER_NAMES: &'static [&'static str] = &[
+        // vLLM Semantic Router (IRIS) — cluster affinity header
+        "x-semantic-cluster-id",
+        // Standard session / user identifiers
         "x-session-id",
         "x-user-id",
         "x-tenant-id",
@@ -574,6 +671,9 @@ impl LoadBalancingPolicy for ConsistentHashPolicy {
             return None;
         }
 
+        // Evict sessions that have exceeded SESSION_TTL (opportunistic cleanup)
+        self.evict_expired_sessions();
+
         // Update hash ring if needed
         self.update_hash_ring(workers);
 
@@ -591,6 +691,23 @@ impl LoadBalancingPolicy for ConsistentHashPolicy {
             );
         }
         info!("CONSISTENT_HASH_DEBUG: Extracted hash key: {}", hash_key);
+
+        // --- Sticky session fast path ---
+        // Only use sticky map when we have an explicit session/user ID (not a body hash).
+        // Body-hash keys change with every request and must not be pinned.
+        let is_explicit_session = hash_key.starts_with("session:") || hash_key.starts_with("user:");
+        if is_explicit_session {
+            if let Some(idx) = self.get_sticky_worker(&hash_key, workers) {
+                let worker_url = workers[idx].url();
+                // Refresh timestamp so active sessions don't expire
+                self.pin_session(&hash_key, worker_url);
+                workers[idx].increment_processed();
+                RouterMetrics::record_processed_request(worker_url);
+                RouterMetrics::record_policy_decision(self.name(), worker_url);
+                debug!("Sticky session hit: key='{}' -> worker='{}'", hash_key, worker_url);
+                return Some(idx);
+            }
+        }
 
         // Find target worker using consistent hashing
         let target_worker_url = match self.find_worker_by_hash(&hash_key) {
@@ -649,6 +766,11 @@ impl LoadBalancingPolicy for ConsistentHashPolicy {
                         hash_key, worker_url, idx
                     );
 
+                    // Pin the session so future requests with the same key skip the ring lookup
+                    if is_explicit_session {
+                        self.pin_session(&hash_key, worker_url);
+                    }
+
                     // Increment processed counter
                     workers[idx].increment_processed();
                     RouterMetrics::record_processed_request(worker_url);
@@ -656,30 +778,64 @@ impl LoadBalancingPolicy for ConsistentHashPolicy {
 
                     Some(idx)
                 } else {
-                    // Target worker is unhealthy, fall back to first healthy worker
+                    // Target worker is unhealthy — walk the ring to find the next
+                    // healthy worker in ring order (preserves affinity better than
+                    // always picking healthy_indices[0])
                     debug!(
-                        "Target worker '{}' is unhealthy, falling back to healthy worker",
+                        "Target worker '{}' is unhealthy, walking ring for next healthy worker",
                         workers[idx].url()
                     );
-                    let fallback_idx = healthy_indices[0];
-                    let worker_url = workers[fallback_idx].url();
+                    let next_url = self
+                        .find_next_healthy_in_ring(&hash_key, workers)
+                        .unwrap_or_else(|| workers[healthy_indices[0]].url().to_string());
 
+                    let fallback_idx = workers
+                        .iter()
+                        .position(|w| {
+                            let (base, _) = self.extract_dp_info(w.url());
+                            let (next_base, _) = self.extract_dp_info(&next_url);
+                            base == next_base
+                        })
+                        .unwrap_or(healthy_indices[0]);
+
+                    let worker_url = workers[fallback_idx].url();
+                    if is_explicit_session {
+                        self.pin_session(&hash_key, worker_url);
+                    }
                     workers[fallback_idx].increment_processed();
                     RouterMetrics::record_processed_request(worker_url);
                     RouterMetrics::record_policy_decision(self.name(), worker_url);
+                    info!(
+                        "Consistent hash ring fallback: key='{}' -> next healthy worker='{}'",
+                        hash_key, worker_url
+                    );
 
                     Some(fallback_idx)
                 }
             }
             None => {
-                // Worker not found in current set, fall back to first healthy worker
+                // Worker not found in current set — walk the ring for next healthy
                 debug!(
-                    "Target worker '{}' not found in current worker set, falling back",
+                    "Target worker '{}' not found in current worker set, walking ring",
                     target_worker_url
                 );
-                let fallback_idx = healthy_indices[0];
-                let worker_url = workers[fallback_idx].url();
+                let next_url = self
+                    .find_next_healthy_in_ring(&hash_key, workers)
+                    .unwrap_or_else(|| workers[healthy_indices[0]].url().to_string());
 
+                let fallback_idx = workers
+                    .iter()
+                    .position(|w| {
+                        let (base, _) = self.extract_dp_info(w.url());
+                        let (next_base, _) = self.extract_dp_info(&next_url);
+                        base == next_base
+                    })
+                    .unwrap_or(healthy_indices[0]);
+
+                let worker_url = workers[fallback_idx].url();
+                if is_explicit_session {
+                    self.pin_session(&hash_key, worker_url);
+                }
                 workers[fallback_idx].increment_processed();
                 RouterMetrics::record_processed_request(worker_url);
                 RouterMetrics::record_policy_decision(self.name(), worker_url);
@@ -711,7 +867,8 @@ impl LoadBalancingPolicy for ConsistentHashPolicy {
             let mut current = self.current_workers.write().unwrap();
             current.clear();
         }
-        info!("Consistent hash policy reset - hash ring cleared");
+        self.session_map.clear();
+        info!("Consistent hash policy reset - hash ring and session map cleared");
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -803,5 +960,85 @@ mod tests {
         assert_eq!(idx1, idx2);
         assert_eq!(idx2, idx3);
         assert!(idx1.is_some());
+    }
+
+    #[test]
+    fn test_sticky_session_pins_worker() {
+        let policy = ConsistentHashPolicy::new();
+        let workers: Vec<Arc<dyn Worker>> = vec![
+            Arc::new(BasicWorker::new(
+                "http://worker1:8000".to_string(),
+                WorkerType::Regular,
+            )),
+            Arc::new(BasicWorker::new(
+                "http://worker2:8000".to_string(),
+                WorkerType::Regular,
+            )),
+        ];
+
+        // First request populates the sticky map
+        let request = r#"{"session_id": "sticky_test_session"}"#;
+        let idx1 = policy.select_worker(&workers, Some(request)).unwrap();
+
+        // Subsequent requests with same session_id must return the same worker
+        for _ in 0..5 {
+            let idx = policy.select_worker(&workers, Some(request)).unwrap();
+            assert_eq!(idx, idx1, "Sticky session should always route to the same worker");
+        }
+    }
+
+    #[test]
+    fn test_sticky_session_fallback_on_unhealthy_worker() {
+        let policy = ConsistentHashPolicy::new();
+        let worker1 = Arc::new(BasicWorker::new(
+            "http://worker1:8000".to_string(),
+            WorkerType::Regular,
+        ));
+        let worker2 = Arc::new(BasicWorker::new(
+            "http://worker2:8000".to_string(),
+            WorkerType::Regular,
+        ));
+        let workers: Vec<Arc<dyn Worker>> = vec![worker1.clone(), worker2.clone()];
+
+        // Pin a session to whichever worker the ring selects
+        let request = r#"{"session_id": "failover_test"}"#;
+        let original_idx = policy.select_worker(&workers, Some(request)).unwrap();
+
+        // Mark that worker as unhealthy
+        workers[original_idx].set_healthy(false);
+
+        // Next request must go to the other worker (not return None)
+        let fallback_idx = policy.select_worker(&workers, Some(request));
+        assert!(fallback_idx.is_some(), "Should fall back to a healthy worker");
+        assert_ne!(
+            fallback_idx.unwrap(),
+            original_idx,
+            "Fallback should not be the unhealthy worker"
+        );
+    }
+
+    #[test]
+    fn test_body_hash_key_not_pinned() {
+        // Requests without explicit session_id use a body hash and must NOT be pinned
+        let policy = ConsistentHashPolicy::new();
+        let workers: Vec<Arc<dyn Worker>> = vec![
+            Arc::new(BasicWorker::new(
+                "http://worker1:8000".to_string(),
+                WorkerType::Regular,
+            )),
+            Arc::new(BasicWorker::new(
+                "http://worker2:8000".to_string(),
+                WorkerType::Regular,
+            )),
+        ];
+
+        let request = r#"{"messages":[{"role":"user","content":"hello"}]}"#;
+        policy.select_worker(&workers, Some(request));
+
+        // session_map must remain empty because no explicit session ID was provided
+        assert!(
+            policy.session_map.is_empty(),
+            "Body-hash requests must not pollute the session map"
+        );
     }
 }

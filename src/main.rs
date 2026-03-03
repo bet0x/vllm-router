@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use vllm_router_rs::config::{
     CircuitBreakerConfig, ConfigError, ConfigResult, ConnectionMode, DiscoveryConfig,
     HealthCheckConfig, HistoryBackend, MetricsConfig, PolicyConfig, RetryConfig, RouterConfig,
-    RoutingMode,
+    RoutingMode, SemanticCacheConfig,
 };
 use vllm_router_rs::metrics::PrometheusConfig;
 use vllm_router_rs::server::{self, ServerConfig};
@@ -110,6 +110,12 @@ Examples:
 
 "#)]
 struct CliArgs {
+    /// Path to a YAML config file (RouterConfig).
+    /// When provided, all routing/policy/cluster settings are loaded from the file
+    /// and CLI flags for those settings are ignored.
+    #[arg(long)]
+    config_file: Option<String>,
+
     /// Host address to bind the router server
     #[arg(long, default_value = "127.0.0.1")]
     host: String,
@@ -336,6 +342,19 @@ struct CliArgs {
     #[arg(long)]
     tokenizer_path: Option<String>,
 
+    /// Model-name → tokenizer-spec mappings (format: MODEL_SUBSTRING=SPEC, repeatable).
+    ///
+    /// SPEC can be:
+    ///   tiktoken             — use Tiktoken (cl100k_base)
+    ///   tiktoken:MODEL       — use Tiktoken with MODEL (e.g. tiktoken:p50k_base)
+    ///   /path/to/tokenizer   — local tokenizer file
+    ///   hf-model-id          — HuggingFace model ID (downloads tokenizer)
+    ///
+    /// Example: --tokenizer-model-map llama-3=meta-llama/Meta-Llama-3.1-8B
+    ///          --tokenizer-model-map codex=tiktoken:p50k_base
+    #[arg(long, num_args = 0..)]
+    tokenizer_model_map: Vec<String>,
+
     /// History backend configuration (memory or none)
     #[arg(long, default_value = "memory", value_parser = ["memory", "none"])]
     history_backend: String,
@@ -343,6 +362,34 @@ struct CliArgs {
     /// Enable profiling calls to vLLM workers
     #[arg(long, default_value_t = false)]
     profile: bool,
+
+    // Semantic similarity cache configuration (T-12)
+    /// Base URL of the embeddings endpoint used for semantic caching.
+    /// When set, enables the semantic similarity cache.
+    /// Example: http://localhost:8010
+    #[arg(long)]
+    semantic_cache_embeddings_url: Option<String>,
+
+    /// Model name sent to the embeddings endpoint (default: "default").
+    #[arg(long, default_value = "default")]
+    semantic_cache_embeddings_model: String,
+
+    /// Cosine-similarity threshold for the semantic cache (0.0–1.0, default: 0.95).
+    /// Responses with similarity ≥ threshold are served from cache.
+    #[arg(long, default_value_t = 0.95_f32)]
+    semantic_cache_threshold: f32,
+
+    /// Maximum number of entries in the semantic cache (default: 256).
+    #[arg(long, default_value_t = 256_usize)]
+    semantic_cache_max_entries: usize,
+
+    /// Time-to-live for semantic cache entries in seconds (default: 300).
+    #[arg(long, default_value_t = 300_u64)]
+    semantic_cache_ttl_secs: u64,
+
+    /// Timeout in milliseconds for each embedding HTTP request (default: 500).
+    #[arg(long, default_value_t = 500_u64)]
+    semantic_cache_embedding_timeout_ms: u64,
 }
 
 impl CliArgs {
@@ -625,12 +672,26 @@ impl CliArgs {
             rate_limit_tokens_per_second: None,
             model_path: self.model_path.clone(),
             tokenizer_path: self.tokenizer_path.clone(),
+            tokenizer_model_map: Self::parse_selector(&self.tokenizer_model_map),
             history_backend: match self.history_backend.as_str() {
                 "none" => HistoryBackend::None,
                 _ => HistoryBackend::Memory,
             },
             enable_profiling: self.profile,
             profile_timeout_secs: 10, // Default profiling timeout
+            semantic_cache: self.semantic_cache_embeddings_url.as_ref().map(|url| {
+                SemanticCacheConfig {
+                    embeddings_url: Some(url.clone()),
+                    embeddings_model: self.semantic_cache_embeddings_model.clone(),
+                    threshold: self.semantic_cache_threshold,
+                    max_entries: self.semantic_cache_max_entries,
+                    ttl_secs: self.semantic_cache_ttl_secs,
+                    embedding_timeout_ms: self.semantic_cache_embedding_timeout_ms,
+                }
+            }),
+            // Cluster routing requires structured config (multiple clusters with examples +
+            // workers).  Too complex for flat CLI flags — use a config file instead.
+            semantic_cluster: None,
         })
     }
 
@@ -716,7 +777,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Parse CLI arguments with clap using filtered args
     println!("DEBUG: Parsing CLI arguments with clap");
     println!("DEBUG: Filtered args: {:?}", filtered_args);
-    let cli_args = CliArgs::parse_from(filtered_args);
+    let mut cli_args = CliArgs::parse_from(filtered_args);
     println!("DEBUG: CLI args parsed successfully");
     println!("DEBUG: pd_disaggregation: {}", cli_args.pd_disaggregation);
     println!(
@@ -740,13 +801,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     println!("Mode: {}", mode_str);
 
-    // Warn for runtimes that are parsed but not yet implemented
+    // Warn for runtimes that are parsed but not yet fully implemented
     match cli_args.backend {
-        Backend::Trtllm | Backend::Anthropic => {
+        Backend::Trtllm => {
             println!(
                 "WARNING: runtime '{}' not implemented yet; falling back to regular routing. \
 Provide --worker-urls or PD flags as usual.",
                 cli_args.backend
+            );
+        }
+        Backend::Anthropic => {
+            println!(
+                "INFO: Anthropic backend mode — POST /v1/messages is available and will \
+translate to the backend's OpenAI-compatible chat endpoint."
             );
         }
         Backend::Vllm | Backend::Openai => {}
@@ -761,9 +828,28 @@ Provide --worker-urls or PD flags as usual.",
         }
     }
 
-    // Convert to RouterConfig
+    // Convert to RouterConfig — either from a YAML file or from CLI flags
     println!("DEBUG: Converting to RouterConfig");
-    let router_config = cli_args.to_router_config(prefill_urls)?;
+    let router_config = if let Some(ref path) = cli_args.config_file {
+        println!("DEBUG: Loading RouterConfig from file: {path}");
+        let content = std::fs::read_to_string(path).map_err(|e| {
+            ConfigError::InvalidValue {
+                field: "config_file".to_string(),
+                value: path.clone(),
+                reason: format!("Cannot read file: {e}"),
+            }
+        })?;
+        let cfg: RouterConfig = serde_yaml::from_str(&content).map_err(|e| {
+            ConfigError::InvalidValue {
+                field: "config_file".to_string(),
+                value: path.clone(),
+                reason: format!("YAML parse error: {e}"),
+            }
+        })?;
+        cfg
+    } else {
+        cli_args.to_router_config(prefill_urls)?
+    };
     println!("DEBUG: RouterConfig created successfully");
 
     // Validate configuration
@@ -771,7 +857,13 @@ Provide --worker-urls or PD flags as usual.",
     router_config.validate()?;
     println!("DEBUG: Configuration validated successfully");
 
-    // Create ServerConfig
+    // Create ServerConfig.
+    // When loading from a config file, honour host/port from RouterConfig
+    // (which was read from the YAML) rather than the CLI defaults.
+    if cli_args.config_file.is_some() {
+        cli_args.host = router_config.host.clone();
+        cli_args.port = router_config.port;
+    }
     println!("DEBUG: Creating ServerConfig");
     println!(
         "DEBUG: CLI host: {}, port: {}",

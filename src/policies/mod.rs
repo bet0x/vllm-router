@@ -15,6 +15,7 @@ mod power_of_two;
 mod random;
 mod registry;
 mod round_robin;
+pub mod semantic_cluster;
 
 pub use cache_aware::CacheAwarePolicy;
 pub use consistent_hash::ConsistentHashPolicy;
@@ -23,6 +24,7 @@ pub use power_of_two::PowerOfTwoPolicy;
 pub use random::RandomPolicy;
 pub use registry::PolicyRegistry;
 pub use round_robin::RoundRobinPolicy;
+pub use semantic_cluster::SemanticClusterPolicy;
 
 /// HTTP headers passed to policies for routing decisions
 /// Key is lowercase header name, value is header value

@@ -21,8 +21,10 @@ use axum::{
     extract::Request,
     http::{HeaderMap, Method, StatusCode},
     response::{IntoResponse, Response},
+    Json,
 };
 use dashmap::DashMap;
+use futures_util::future::join_all;
 use std::sync::Arc;
 use tracing::{info, warn};
 
@@ -436,14 +438,41 @@ impl RouterManager {
                 score += 1.0; // Bonus for matching regular preference
             }
 
-            // Get workers for this router and evaluate based on priority/cost
-            // Note: This would require routers to expose their workers or stats
-            // For now, we'll use a simple selection based on router type
+            // Score based on real worker stats from the shared registry.
+            // Workers are filtered by model_id if specified, otherwise all workers.
+            let workers = match model_id {
+                Some(m) => self.worker_registry.get_by_model_fast(m),
+                None => self.worker_registry.get_all(),
+            };
+            let healthy_workers: Vec<_> = workers.iter().filter(|w| w.is_healthy()).collect();
 
-            // TODO: Once routers expose worker stats, we can evaluate:
-            // - Average worker priority vs priority_threshold
-            // - Average worker cost vs max_cost
-            // - Current load and health status
+            if !healthy_workers.is_empty() {
+                // Penalize routers with high average in-flight load (max -2.0)
+                let total_load: usize = healthy_workers.iter().map(|w| w.load()).sum();
+                let avg_load = total_load as f32 / healthy_workers.len() as f32;
+                score -= (avg_load / 10.0).min(2.0);
+
+                // Bonus for routers whose workers match priority threshold
+                if let Some(threshold) = _priority_threshold {
+                    let avg_priority: f32 = healthy_workers
+                        .iter()
+                        .map(|w| w.priority() as f32)
+                        .sum::<f32>()
+                        / healthy_workers.len() as f32;
+                    if avg_priority >= threshold as f32 {
+                        score += 1.0;
+                    }
+                }
+
+                // Penalize routers whose average cost exceeds max_cost
+                if let Some(max_cost) = _max_cost {
+                    let avg_cost: f32 = healthy_workers.iter().map(|w| w.cost()).sum::<f32>()
+                        / healthy_workers.len() as f32;
+                    if avg_cost > max_cost {
+                        score -= 2.0;
+                    }
+                }
+            }
 
             if score > best_score {
                 best_score = score;
@@ -452,6 +481,69 @@ impl RouterManager {
         }
 
         best_router
+    }
+
+    async fn aggregate_models(&self) -> Response {
+        let worker_urls = self.worker_registry.get_all_urls();
+
+        if worker_urls.is_empty() {
+            return (StatusCode::SERVICE_UNAVAILABLE, "No workers available").into_response();
+        }
+
+        let client = &self.client;
+        let futures: Vec<_> = worker_urls
+            .into_iter()
+            .map(|worker_url| async move {
+                let url = format!("{}/v1/models", worker_url.trim_end_matches('/'));
+                match client.get(&url).send().await {
+                    Ok(res) => {
+                        if res.status().is_success() {
+                            match res.json::<serde_json::Value>().await {
+                                Ok(json) => Some(json),
+                                Err(e) => {
+                                    warn!("Failed to parse models from {}: {}", worker_url, e);
+                                    None
+                                }
+                            }
+                        } else {
+                            warn!("Worker {} returned status {}", worker_url, res.status());
+                            None
+                        }
+                    }
+                    Err(e) => {
+                        warn!("Failed to fetch models from {}: {}", worker_url, e);
+                        None
+                    }
+                }
+            })
+            .collect();
+
+        let results = join_all(futures).await;
+
+        let mut all_models: Vec<serde_json::Value> = Vec::new();
+        let mut seen_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+        for result in results.into_iter().flatten() {
+            if let Some(data) = result.get("data").and_then(|d| d.as_array()) {
+                for model in data {
+                    if let Some(id) = model.get("id").and_then(|i| i.as_str()) {
+                        if seen_ids.insert(id.to_string()) {
+                            all_models.push(model.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        if all_models.is_empty() {
+            (StatusCode::SERVICE_UNAVAILABLE, "No models available from workers").into_response()
+        } else {
+            Json(serde_json::json!({
+                "object": "list",
+                "data": all_models
+            }))
+            .into_response()
+        }
     }
 }
 
@@ -504,50 +596,52 @@ impl RouterTrait for RouterManager {
         (StatusCode::OK, "RouterManager is healthy").into_response()
     }
 
-    /// Health generate - check if any router can handle generate requests
+    /// Health generate - check if any router has healthy workers
     async fn health_generate(&self, _req: Request<Body>) -> Response {
-        // Return 503 since we have no routers with workers
-        // TODO: Should check if any router has healthy workers
-        (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "No routers with healthy workers available",
-        )
-            .into_response()
+        let has_healthy = self
+            .worker_registry
+            .get_all()
+            .iter()
+            .any(|w| w.is_healthy());
+
+        if has_healthy {
+            (StatusCode::OK, "Healthy workers available").into_response()
+        } else {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "No routers with healthy workers available",
+            )
+                .into_response()
+        }
     }
 
     /// Get server information - aggregate from all routers
     async fn get_server_info(&self, _req: Request<Body>) -> Response {
-        // TODO: Aggregate info from all routers with healthy workers
-        // For now, return basic info about the RouterManager
+        let workers = self.worker_registry.get_all();
+        let healthy_count = workers.iter().filter(|w| w.is_healthy()).count();
+        let router_ids: Vec<String> = self
+            .routers
+            .iter()
+            .map(|e| e.key().0.clone())
+            .collect();
+
         (
             StatusCode::OK,
             serde_json::json!({
                 "router_manager": true,
                 "routers_count": self.routers.len(),
-                "workers_count": self.worker_registry.get_all().len()
+                "routers": router_ids,
+                "workers_count": workers.len(),
+                "healthy_workers_count": healthy_count,
             })
             .to_string(),
         )
             .into_response()
     }
 
-    /// Get available models - query from worker registry
+    /// Get available models - aggregate from all workers across all routers
     async fn get_models(&self, _req: Request<Body>) -> Response {
-        // Get models from worker registry
-        let models = self.worker_registry.get_models();
-
-        if models.is_empty() {
-            (StatusCode::SERVICE_UNAVAILABLE, "No models available").into_response()
-        } else {
-            (
-                StatusCode::OK,
-                serde_json::json!({
-                    "models": models
-                })
-                .to_string(),
-            )
-                .into_response()
-        }
+        self.aggregate_models().await
     }
 
     /// Get model information
@@ -637,35 +731,99 @@ impl RouterTrait for RouterManager {
 
     async fn route_responses(
         &self,
-        _headers: Option<&HeaderMap>,
-        _body: &ResponsesRequest,
+        headers: Option<&HeaderMap>,
+        body: &ResponsesRequest,
         _model_id: Option<&str>,
     ) -> Response {
-        (
-            StatusCode::NOT_IMPLEMENTED,
-            "responses api not yet implemented in inference gateway mode",
-        )
-            .into_response()
+        let model_id = body.model.as_deref();
+        let router = self.select_router_for_request(headers, model_id);
+
+        if let Some(router) = router {
+            router.route_responses(headers, body, model_id).await
+        } else {
+            let msg = match model_id {
+                Some(m) => format!("Model '{}' not found or no router available", m),
+                None => "No routers registered to handle this request".to_string(),
+            };
+            (StatusCode::NOT_FOUND, msg).into_response()
+        }
     }
 
-    async fn delete_response(&self, _headers: Option<&HeaderMap>, _response_id: &str) -> Response {
-        (
-            StatusCode::NOT_IMPLEMENTED,
-            "responses api not yet implemented in inference gateway mode",
-        )
-            .into_response()
+    async fn delete_response(&self, headers: Option<&HeaderMap>, response_id: &str) -> Response {
+        // vLLM maintains response state in-memory per worker.
+        // Fanout DELETE to all routers; return first 2xx success or 404 if not found.
+        let routers: Vec<Arc<dyn RouterTrait>> = self
+            .routers
+            .iter()
+            .map(|entry| entry.value().clone())
+            .collect();
+
+        if routers.is_empty() {
+            return (StatusCode::SERVICE_UNAVAILABLE, "No routers configured").into_response();
+        }
+
+        let futures: Vec<_> = routers
+            .iter()
+            .map(|r| r.delete_response(headers, response_id))
+            .collect();
+        let results = join_all(futures).await;
+
+        // Return first 2xx response; fall back to last error
+        let mut last_err = None;
+        for res in results {
+            let status = res.status();
+            if status.is_success() {
+                return res;
+            }
+            last_err = Some(res);
+        }
+        last_err.unwrap_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                format!("Response '{}' not found on any worker", response_id),
+            )
+                .into_response()
+        })
     }
 
     async fn list_response_input_items(
         &self,
-        _headers: Option<&HeaderMap>,
-        _response_id: &str,
+        headers: Option<&HeaderMap>,
+        response_id: &str,
     ) -> Response {
-        (
-            StatusCode::NOT_IMPLEMENTED,
-            "responses api not yet implemented in inference gateway mode",
-        )
-            .into_response()
+        // vLLM maintains response state in-memory per worker.
+        // Fanout to all routers; return first 2xx success or 404 if not found.
+        let routers: Vec<Arc<dyn RouterTrait>> = self
+            .routers
+            .iter()
+            .map(|entry| entry.value().clone())
+            .collect();
+
+        if routers.is_empty() {
+            return (StatusCode::SERVICE_UNAVAILABLE, "No routers configured").into_response();
+        }
+
+        let futures: Vec<_> = routers
+            .iter()
+            .map(|r| r.list_response_input_items(headers, response_id))
+            .collect();
+        let results = join_all(futures).await;
+
+        let mut last_err = None;
+        for res in results {
+            let status = res.status();
+            if status.is_success() {
+                return res;
+            }
+            last_err = Some(res);
+        }
+        last_err.unwrap_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                format!("Response '{}' not found on any worker", response_id),
+            )
+                .into_response()
+        })
     }
 
     async fn get_response(&self, headers: Option<&HeaderMap>, response_id: &str) -> Response {
@@ -725,8 +883,9 @@ impl RouterTrait for RouterManager {
         body: &RerankRequest,
         model_id: Option<&str>,
     ) -> Response {
-        // Try to select a router based on headers
-        let router = self.select_router_for_request(headers, None);
+        // Use model from body if not passed explicitly
+        let effective_model = model_id.or(Some(body.model.as_str()));
+        let router = self.select_router_for_request(headers, effective_model);
 
         if let Some(router) = router {
             router.route_rerank(headers, body, model_id).await
@@ -739,15 +898,33 @@ impl RouterTrait for RouterManager {
         }
     }
 
-    /// Flush cache on all routers and workers
+    /// Flush cache on all routers and their workers
     async fn flush_cache(&self) -> Response {
-        // TODO: Call flush_cache on all routers that have workers
-        // For now, return success if we have any routers
         if self.routers.is_empty() {
-            (StatusCode::SERVICE_UNAVAILABLE, "No routers configured").into_response()
+            return (StatusCode::SERVICE_UNAVAILABLE, "No routers configured").into_response();
+        }
+
+        let routers: Vec<Arc<dyn RouterTrait>> = self
+            .routers
+            .iter()
+            .map(|entry| entry.value().clone())
+            .collect();
+
+        let futures: Vec<_> = routers.iter().map(|r| r.flush_cache()).collect();
+        let results = join_all(futures).await;
+
+        let all_success = results
+            .iter()
+            .all(|r| r.status() == axum::http::StatusCode::OK);
+
+        if all_success {
+            (StatusCode::OK, "Cache flushed on all routers").into_response()
         } else {
-            // TODO: Actually flush cache on all routers
-            (StatusCode::OK, "Cache flush requested").into_response()
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Cache flush failed on one or more routers",
+            )
+                .into_response()
         }
     }
 
@@ -782,13 +959,20 @@ impl RouterTrait for RouterManager {
         "manager"
     }
 
-    /// Server readiness check - check if any router is ready
+    /// Server readiness check - ready when at least one worker is healthy
     fn readiness(&self) -> Response {
         if self.routers.is_empty() {
-            (StatusCode::SERVICE_UNAVAILABLE, "No routers configured").into_response()
-        } else {
-            // TODO: Check readiness of all routers
+            return (StatusCode::SERVICE_UNAVAILABLE, "No routers configured").into_response();
+        }
+        let has_healthy = self
+            .worker_registry
+            .get_all()
+            .iter()
+            .any(|w| w.is_healthy());
+        if has_healthy {
             (StatusCode::OK, "Ready").into_response()
+        } else {
+            (StatusCode::SERVICE_UNAVAILABLE, "No healthy workers available").into_response()
         }
     }
 

@@ -1,11 +1,13 @@
 use super::traits;
 use anyhow::{Error, Result};
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
 use std::sync::Arc;
 
 use super::huggingface::HuggingFaceTokenizer;
+use super::sentencepiece::SentencePieceTokenizer;
 use super::tiktoken::TiktokenTokenizer;
 use crate::tokenizer::hub::download_tokenizer_from_hf;
 
@@ -14,8 +16,8 @@ use crate::tokenizer::hub::download_tokenizer_from_hf;
 pub enum TokenizerType {
     HuggingFace(String),
     Mock,
+    SentencePiece(String),
     Tiktoken(String),
-    // Future: SentencePiece, GGUF
 }
 
 /// Create a tokenizer from a file path to a tokenizer file.
@@ -58,8 +60,9 @@ pub fn create_tokenizer_with_chat_template(
             Ok(Arc::new(tokenizer) as Arc<dyn traits::Tokenizer>)
         }
         Some("model") => {
-            // SentencePiece model file
-            Err(Error::msg("SentencePiece models not yet supported"))
+            // SentencePiece native .model file
+            let tokenizer = SentencePieceTokenizer::from_file(file_path)?;
+            Ok(Arc::new(tokenizer) as Arc<dyn traits::Tokenizer>)
         }
         Some("gguf") => {
             // GGUF format
@@ -92,11 +95,10 @@ fn auto_detect_tokenizer(file_path: &str) -> Result<Arc<dyn traits::Tokenizer>> 
         return Err(Error::msg("GGUF format detected but not yet supported"));
     }
 
-    // Check for SentencePiece model
+    // Check for SentencePiece model (protobuf binary format)
     if is_likely_sentencepiece(&buffer) {
-        return Err(Error::msg(
-            "SentencePiece model detected but not yet supported",
-        ));
+        let tokenizer = SentencePieceTokenizer::from_file(file_path)?;
+        return Ok(Arc::new(tokenizer));
     }
 
     Err(Error::msg(format!(
@@ -215,6 +217,65 @@ pub fn create_tokenizer(model_name_or_path: &str) -> Result<Arc<dyn traits::Toke
     }
 }
 
+/// Create a tokenizer using an optional model-name → tokenizer-spec map (T-14).
+///
+/// Before falling back to the standard auto-detection, the map is checked for
+/// a key that is a **substring** of `model_name_or_path` (case-insensitive).
+///
+/// Map value formats:
+/// - `"tiktoken"` — use Tiktoken with the model name as-is
+/// - `"tiktoken:<model>"` — use Tiktoken with the specified model name (e.g. `"tiktoken:gpt-4"`)
+/// - Any other string — treated as a tokenizer path or HuggingFace model ID and passed to
+///   `create_tokenizer`.
+///
+/// Example map:
+/// ```text
+/// {"llama-3": "meta-llama/Meta-Llama-3.1-8B", "my-codex": "tiktoken:p50k_base"}
+/// ```
+pub fn create_tokenizer_with_map(
+    model_name_or_path: &str,
+    model_map: &HashMap<String, String>,
+) -> Result<Arc<dyn traits::Tokenizer>> {
+    let lower = model_name_or_path.to_lowercase();
+
+    // Find the first map entry whose key is a substring of the model name.
+    for (key, spec) in model_map {
+        if lower.contains(&key.to_lowercase()) {
+            return resolve_tokenizer_spec(spec);
+        }
+    }
+
+    // No match — fall back to standard detection.
+    create_tokenizer(model_name_or_path)
+}
+
+/// Resolve a tokenizer spec string to a concrete tokenizer.
+///
+/// Supported spec formats:
+/// - `"tiktoken"` — Tiktoken with cl100k_base (GPT-4 compatible)
+/// - `"tiktoken:<model>"` — Tiktoken with the given model name
+/// - `"sentencepiece:<path>"` — SentencePiece from a local `.model` file
+/// - Any other string — treated as a file path or HuggingFace model ID
+fn resolve_tokenizer_spec(spec: &str) -> Result<Arc<dyn traits::Tokenizer>> {
+    if spec == "tiktoken" {
+        let tok = TiktokenTokenizer::from_model_name("gpt-4")?;
+        return Ok(Arc::new(tok));
+    }
+
+    if let Some(model) = spec.strip_prefix("tiktoken:") {
+        let tok = TiktokenTokenizer::from_model_name(model)?;
+        return Ok(Arc::new(tok));
+    }
+
+    if let Some(path) = spec.strip_prefix("sentencepiece:") {
+        let tok = SentencePieceTokenizer::from_file(path)?;
+        return Ok(Arc::new(tok));
+    }
+
+    // Treat as a tokenizer file path or HuggingFace model ID.
+    create_tokenizer(spec)
+}
+
 /// Get information about a tokenizer file
 pub fn get_tokenizer_info(file_path: &str) -> Result<TokenizerType> {
     let path = Path::new(file_path);
@@ -230,6 +291,7 @@ pub fn get_tokenizer_info(file_path: &str) -> Result<TokenizerType> {
 
     match extension.as_deref() {
         Some("json") => Ok(TokenizerType::HuggingFace(file_path.to_string())),
+        Some("model") => Ok(TokenizerType::SentencePiece(file_path.to_string())),
         _ => {
             // Try auto-detection
             use std::fs::File;
@@ -242,6 +304,8 @@ pub fn get_tokenizer_info(file_path: &str) -> Result<TokenizerType> {
 
             if is_likely_json(&buffer) {
                 Ok(TokenizerType::HuggingFace(file_path.to_string()))
+            } else if is_likely_sentencepiece(&buffer) {
+                Ok(TokenizerType::SentencePiece(file_path.to_string()))
             } else {
                 Err(Error::msg("Unknown tokenizer type"))
             }
@@ -252,6 +316,41 @@ pub fn get_tokenizer_info(file_path: &str) -> Result<TokenizerType> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_tokenizer_map_tiktoken_spec() {
+        // Map "my-gpt" → "tiktoken:gpt-4" should create a Tiktoken tokenizer
+        let mut map = HashMap::new();
+        map.insert("my-gpt".to_string(), "tiktoken:gpt-4".to_string());
+        let tok = create_tokenizer_with_map("my-gpt-model", &map).unwrap();
+        assert!(tok.vocab_size() > 0);
+    }
+
+    #[test]
+    fn test_tokenizer_map_bare_tiktoken() {
+        // "tiktoken" (without model suffix) should default to cl100k_base
+        let mut map = HashMap::new();
+        map.insert("fast-model".to_string(), "tiktoken".to_string());
+        let tok = create_tokenizer_with_map("fast-model-v2", &map).unwrap();
+        assert!(tok.vocab_size() > 0);
+    }
+
+    #[test]
+    fn test_tokenizer_map_no_match_fallback() {
+        // When no key matches, standard detection is used (GPT-4 → Tiktoken)
+        let map = HashMap::new();
+        let tok = create_tokenizer_with_map("gpt-4", &map).unwrap();
+        assert!(tok.vocab_size() > 0);
+    }
+
+    #[test]
+    fn test_tokenizer_map_case_insensitive() {
+        // Keys should match case-insensitively
+        let mut map = HashMap::new();
+        map.insert("LLAMA".to_string(), "tiktoken:gpt-4".to_string());
+        let tok = create_tokenizer_with_map("llama-3-8B", &map).unwrap();
+        assert!(tok.vocab_size() > 0);
+    }
 
     #[test]
     fn test_json_detection() {

@@ -1,0 +1,27 @@
+# Power-of-Two Choices routing
+#
+# On each request, picks 2 workers at random and forwards to the least loaded.
+# Much better than random at avoiding hot-spots, with minimal overhead.
+# Best when workers have variable load (requests of different duration).
+#
+# Requires workers to report their load via /get_server_info.
+#
+# Start:
+#   cargo run -- --config-file configs/power-of-two.yaml
+
+host: "0.0.0.0"
+port: 3000
+log_level: info
+
+mode:
+  type: regular
+  worker_urls:
+    - "http://localhost:8010"
+    - "http://localhost:8020"
+
+policy:
+  type: power_of_two
+  # How often (in seconds) to poll each worker's load.
+  # Lower = more up-to-date but more monitoring traffic.
+  # Higher = less overhead but less precise decisions.
+  load_check_interval_secs: 10

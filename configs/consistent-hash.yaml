@@ -1,0 +1,48 @@
+# Consistent Hash routing (session affinity)
+#
+# Requests from the same user/session always go to the same worker
+# as long as it is healthy. On failure, falls over to the next in the ring.
+#
+# Session ID is extracted in priority order:
+#   1. Header x-session-id
+#   2. Header x-user-id
+#   3. body.session_params.session_id
+#   4. body.user
+#   5. Hash of the full body (fallback, not sticky)
+#
+# Note: only "session:" and "user:" keys are pinned in the sticky map.
+#       Requests without a session ID use body hash (not sticky).
+#
+# Start:
+#   cargo run -- --config-file configs/consistent-hash.yaml
+#
+# Test session affinity:
+#   curl http://localhost:3000/v1/chat/completions \
+#     -H "Content-Type: application/json" \
+#     -H "x-session-id: user-abc" \
+#     -d '{"model":"RedHatAI/Llama-3.2-1B-Instruct-FP8",
+#          "messages":[{"role":"user","content":"Hello"}]}'
+#
+#   # The same x-session-id always routes to the same worker
+#   curl http://localhost:3000/v1/chat/completions \
+#     -H "Content-Type: application/json" \
+#     -H "x-session-id: user-abc" \
+#     -d '{"model":"RedHatAI/Llama-3.2-1B-Instruct-FP8",
+#          "messages":[{"role":"user","content":"Continue our conversation"}]}'
+
+host: "0.0.0.0"
+port: 3000
+log_level: info
+
+mode:
+  type: regular
+  worker_urls:
+    - "http://localhost:8010"
+    - "http://localhost:8020"
+
+policy:
+  type: consistent_hash
+  # Number of virtual nodes per worker in the hash ring.
+  # More vnodes = more uniform distribution, but more memory.
+  # Recommended: 100–200.
+  virtual_nodes: 160

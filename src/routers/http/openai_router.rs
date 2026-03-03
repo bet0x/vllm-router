@@ -3,7 +3,7 @@
 use crate::config::CircuitBreakerConfig;
 use crate::core::{CircuitBreaker, CircuitBreakerConfig as CoreCircuitBreakerConfig};
 use crate::protocols::spec::{
-    ChatCompletionRequest, CompletionRequest, GenerateRequest, RerankRequest,
+    ChatCompletionRequest, CompletionRequest, EmbeddingRequest, GenerateRequest, RerankRequest,
 };
 use async_trait::async_trait;
 use axum::{
@@ -326,16 +326,124 @@ impl super::super::RouterTrait for OpenAIRouter {
 
     async fn route_completion(
         &self,
-        _headers: Option<&HeaderMap>,
-        _body: &CompletionRequest,
+        headers: Option<&HeaderMap>,
+        body: &CompletionRequest,
         _model_id: Option<&str>,
     ) -> Response {
-        // Completion endpoint not implemented for OpenAI backend
-        (
-            StatusCode::NOT_IMPLEMENTED,
-            "Completion endpoint not implemented for OpenAI backend",
-        )
-            .into_response()
+        if !self.circuit_breaker.can_execute() {
+            return (StatusCode::SERVICE_UNAVAILABLE, "Circuit breaker open").into_response();
+        }
+
+        let mut payload = match serde_json::to_value(body) {
+            Ok(v) => v,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    format!("Failed to serialize request: {}", e),
+                )
+                    .into_response();
+            }
+        };
+        // Strip vLLM-specific fields not accepted by stock OpenAI
+        if let Some(obj) = payload.as_object_mut() {
+            for key in [
+                "top_k",
+                "min_p",
+                "min_tokens",
+                "regex",
+                "ebnf",
+                "stop_token_ids",
+                "no_stop_trim",
+                "ignore_eos",
+                "skip_special_tokens",
+                "lora_path",
+                "session_params",
+                "separate_reasoning",
+                "stream_reasoning",
+                "repetition_penalty",
+            ] {
+                obj.remove(key);
+            }
+        }
+
+        let url = format!("{}/v1/completions", self.base_url);
+        let mut req = self.client.post(&url).json(&payload);
+
+        if let Some(h) = headers {
+            if let Some(auth) = h.get("authorization").or_else(|| h.get("Authorization")) {
+                req = req.header("Authorization", auth);
+            }
+        }
+
+        let stream = body.stream;
+        if stream {
+            req = req.header("Accept", "text/event-stream");
+        }
+
+        let resp = match req.send().await {
+            Ok(r) => r,
+            Err(e) => {
+                self.circuit_breaker.record_failure();
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    format!("Failed to contact upstream: {}", e),
+                )
+                    .into_response();
+            }
+        };
+
+        let status = StatusCode::from_u16(resp.status().as_u16())
+            .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+
+        if !stream {
+            let content_type = resp.headers().get(CONTENT_TYPE).cloned();
+            match resp.bytes().await {
+                Ok(bytes) => {
+                    self.circuit_breaker.record_success();
+                    let mut response = Response::new(axum::body::Body::from(bytes));
+                    *response.status_mut() = status;
+                    if let Some(ct) = content_type {
+                        response.headers_mut().insert(CONTENT_TYPE, ct);
+                    }
+                    response
+                }
+                Err(e) => {
+                    self.circuit_breaker.record_failure();
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("Failed to read response: {}", e),
+                    )
+                        .into_response()
+                }
+            }
+        } else {
+            let stream = resp.bytes_stream();
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            tokio::spawn(async move {
+                let mut s = stream;
+                while let Some(chunk) = s.next().await {
+                    match chunk {
+                        Ok(bytes) => {
+                            if tx.send(Ok(bytes)).is_err() {
+                                break;
+                            }
+                        }
+                        Err(e) => {
+                            let _ = tx.send(Err(format!("Stream error: {}", e)));
+                            break;
+                        }
+                    }
+                }
+            });
+            let mut response = Response::new(Body::from_stream(
+                tokio_stream::wrappers::UnboundedReceiverStream::new(rx),
+            ));
+            *response.status_mut() = status;
+            response
+                .headers_mut()
+                .insert(CONTENT_TYPE, HeaderValue::from_static("text/event-stream"));
+            response
+        }
     }
 
     async fn route_responses(
@@ -397,27 +505,157 @@ impl super::super::RouterTrait for OpenAIRouter {
 
     async fn route_embeddings(
         &self,
-        _headers: Option<&HeaderMap>,
-        _body: &crate::protocols::spec::EmbeddingRequest,
+        headers: Option<&HeaderMap>,
+        body: &EmbeddingRequest,
         _model_id: Option<&str>,
     ) -> Response {
-        (
-            StatusCode::NOT_IMPLEMENTED,
-            "Embeddings endpoint not implemented for OpenAI backend",
-        )
-            .into_response()
+        if !self.circuit_breaker.can_execute() {
+            return (StatusCode::SERVICE_UNAVAILABLE, "Circuit breaker open").into_response();
+        }
+
+        let mut payload = match serde_json::to_value(body) {
+            Ok(v) => v,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    format!("Failed to serialize request: {}", e),
+                )
+                    .into_response();
+            }
+        };
+        // Strip vLLM-specific fields
+        if let Some(obj) = payload.as_object_mut() {
+            for key in ["rid", "additional_data"] {
+                obj.remove(key);
+            }
+        }
+
+        let url = format!("{}/v1/embeddings", self.base_url);
+        let mut req = self.client.post(&url).json(&payload);
+
+        if let Some(h) = headers {
+            if let Some(auth) = h.get("authorization").or_else(|| h.get("Authorization")) {
+                req = req.header("Authorization", auth);
+            }
+        }
+
+        let resp = match req.send().await {
+            Ok(r) => r,
+            Err(e) => {
+                self.circuit_breaker.record_failure();
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    format!("Failed to contact upstream: {}", e),
+                )
+                    .into_response();
+            }
+        };
+
+        let status = StatusCode::from_u16(resp.status().as_u16())
+            .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+        let content_type = resp.headers().get(CONTENT_TYPE).cloned();
+
+        match resp.bytes().await {
+            Ok(bytes) => {
+                if status.is_success() {
+                    self.circuit_breaker.record_success();
+                } else {
+                    self.circuit_breaker.record_failure();
+                }
+                let mut response = Response::new(axum::body::Body::from(bytes));
+                *response.status_mut() = status;
+                if let Some(ct) = content_type {
+                    response.headers_mut().insert(CONTENT_TYPE, ct);
+                }
+                response
+            }
+            Err(e) => {
+                self.circuit_breaker.record_failure();
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Failed to read response: {}", e),
+                )
+                    .into_response()
+            }
+        }
     }
 
     async fn route_rerank(
         &self,
-        _headers: Option<&HeaderMap>,
-        _body: &RerankRequest,
+        headers: Option<&HeaderMap>,
+        body: &RerankRequest,
         _model_id: Option<&str>,
     ) -> Response {
-        (
-            StatusCode::NOT_IMPLEMENTED,
-            "Rerank endpoint not implemented for OpenAI backend",
-        )
-            .into_response()
+        // Rerank is supported by Cohere-compatible and vLLM backends.
+        // Proxy as-is since field names are standard (query, documents, model, top_k).
+        if !self.circuit_breaker.can_execute() {
+            return (StatusCode::SERVICE_UNAVAILABLE, "Circuit breaker open").into_response();
+        }
+
+        let mut payload = match serde_json::to_value(body) {
+            Ok(v) => v,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    format!("Failed to serialize request: {}", e),
+                )
+                    .into_response();
+            }
+        };
+        // Strip vLLM-specific fields not part of Cohere/OpenAI spec
+        if let Some(obj) = payload.as_object_mut() {
+            for key in ["rid", "additional_data"] {
+                obj.remove(key);
+            }
+        }
+
+        let url = format!("{}/v1/rerank", self.base_url);
+        let mut req = self.client.post(&url).json(&payload);
+
+        if let Some(h) = headers {
+            if let Some(auth) = h.get("authorization").or_else(|| h.get("Authorization")) {
+                req = req.header("Authorization", auth);
+            }
+        }
+
+        let resp = match req.send().await {
+            Ok(r) => r,
+            Err(e) => {
+                self.circuit_breaker.record_failure();
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    format!("Failed to contact upstream: {}", e),
+                )
+                    .into_response();
+            }
+        };
+
+        let status = StatusCode::from_u16(resp.status().as_u16())
+            .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+        let content_type = resp.headers().get(CONTENT_TYPE).cloned();
+
+        match resp.bytes().await {
+            Ok(bytes) => {
+                if status.is_success() {
+                    self.circuit_breaker.record_success();
+                } else {
+                    self.circuit_breaker.record_failure();
+                }
+                let mut response = Response::new(axum::body::Body::from(bytes));
+                *response.status_mut() = status;
+                if let Some(ct) = content_type {
+                    response.headers_mut().insert(CONTENT_TYPE, ct);
+                }
+                response
+            }
+            Err(e) => {
+                self.circuit_breaker.record_failure();
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Failed to read response: {}", e),
+                )
+                    .into_response()
+            }
+        }
     }
 }

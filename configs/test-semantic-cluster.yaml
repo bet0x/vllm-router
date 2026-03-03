@@ -1,0 +1,161 @@
+# Test config: Semantic Cluster Routing
+#
+# Two vLLM workers (same model, different ports) acting as "specialized" clusters.
+# In a real setup each cluster would point to workers fine-tuned for the domain.
+#
+# Workers must be running before starting the router.
+# The embeddings worker (port 8030) is required for cluster routing:
+#   ./scripts/start_test_workers.sh --all
+#
+# Start the router:
+#   cargo run -- --config-file configs/test-semantic-cluster.yaml
+#
+# The router listens on http://localhost:3000
+#
+# Test examples:
+#   # Should route to "coding" cluster (port 8010)
+#   curl -s http://localhost:3000/v1/chat/completions \
+#     -H "Content-Type: application/json" \
+#     -d '{"model":"RedHatAI/Llama-3.2-1B-Instruct-FP8",
+#          "messages":[{"role":"user","content":"Write a Rust function to reverse a string"}]}'
+#
+#   # Should route to "science" cluster (port 8020)
+#   curl -s http://localhost:3000/v1/chat/completions \
+#     -H "Content-Type: application/json" \
+#     -d '{"model":"RedHatAI/Llama-3.2-1B-Instruct-FP8",
+#          "messages":[{"role":"user","content":"Explain the process of photosynthesis"}]}'
+#
+#   # Below threshold → round-robin fallback
+#   curl -s http://localhost:3000/v1/chat/completions \
+#     -H "Content-Type: application/json" \
+#     -d '{"model":"RedHatAI/Llama-3.2-1B-Instruct-FP8",
+#          "messages":[{"role":"user","content":"Hello, how are you?"}]}'
+
+# ---------------------------------------------------------------------------
+# Server
+# ---------------------------------------------------------------------------
+
+# IP/hostname where the router listens. 0.0.0.0 = all interfaces.
+host: "0.0.0.0"
+
+# TCP port for the router HTTP API.
+port: 3000
+
+# Log level: trace | debug | info | warn | error
+log_level: info
+
+# ---------------------------------------------------------------------------
+# Routing mode
+# ---------------------------------------------------------------------------
+# type: regular          — single pool of workers, no PD disaggregation
+# type: prefill_decode   — separate prefill and decode worker pools
+# type: openai           — proxy to an OpenAI-compatible backend
+mode:
+  type: regular
+  worker_urls:
+    - "http://localhost:8010"
+    - "http://localhost:8020"
+
+# ---------------------------------------------------------------------------
+# Default load-balancing policy (used when no cluster matches)
+# ---------------------------------------------------------------------------
+# Uncomment the block you want and comment out the rest.
+#
+# round_robin — strict round-robin, no extra params
+policy:
+  type: round_robin
+
+# random — uniform random selection, no extra params
+# policy:
+#   type: random
+
+# consistent_hash — session-sticky routing via hash ring
+#   virtual_nodes: vnodes per worker (default 160, higher = better distribution)
+# policy:
+#   type: consistent_hash
+#   virtual_nodes: 160
+
+# power_of_two — pick least-loaded of two random workers
+#   load_check_interval_secs: how often to poll worker load (seconds)
+# policy:
+#   type: power_of_two
+#   load_check_interval_secs: 10
+
+# cache_aware — KV-cache prefix-tree routing (best for repeated prompts)
+#   cache_threshold:        min prefix-match ratio to prefer a cached worker [0.0–1.0]
+#   balance_abs_threshold:  absolute load gap that forces rebalancing
+#   balance_rel_threshold:  relative load ratio that forces rebalancing (>= 1.0)
+#   eviction_interval_secs: how often the prefix tree is pruned
+#   max_tree_size:          max nodes kept in the prefix tree
+# policy:
+#   type: cache_aware
+#   cache_threshold: 0.5
+#   balance_abs_threshold: 32
+#   balance_rel_threshold: 1.1
+#   eviction_interval_secs: 30
+#   max_tree_size: 10000
+
+# ---------------------------------------------------------------------------
+# Semantic Cluster Routing
+# ---------------------------------------------------------------------------
+# Requests are embedded and compared (cosine similarity) to pre-computed
+# cluster centroids.  If the best match exceeds `threshold`, the request is
+# forwarded to the workers of that cluster.  Otherwise it falls through to
+# the default policy above.
+semantic_cluster:
+
+  # Base URL of the OpenAI-compatible embeddings server.
+  # Start the embedded worker with: ./scripts/start_test_workers.sh --all
+  embeddings_url: "http://localhost:8030"
+
+  # Model served at embeddings_url used to embed examples and requests.
+  # Must match what the server actually serves (/v1/models).
+  embeddings_model: "BAAI/bge-small-en-v1.5"
+
+  # Minimum cosine similarity [0.0, 1.0] required to accept a cluster match.
+  #   0.50 → loose matching, most requests routed to some cluster
+  #   0.70 → balanced (default)
+  #   0.90 → tight matching, only very on-topic queries get routed
+  # Requests below this score use the default policy (round-robin here).
+  threshold: 0.70
+
+  # HTTP timeout in milliseconds for each embedding API call.
+  # Increase if the embeddings server is remote or under load.
+  embedding_timeout_ms: 2000
+
+  # ------------------------------------------------------------------
+  # Cluster definitions
+  # Each cluster needs:
+  #   name     — identifier shown in logs and Prometheus metrics
+  #   workers  — subset of the worker_urls above that serve this domain
+  #   examples — representative prompts used to compute the centroid;
+  #              more examples = more stable centroid (8–16 recommended)
+  # ------------------------------------------------------------------
+  clusters:
+    - name: coding
+      # Route programming / engineering questions here
+      workers:
+        - "http://localhost:8010"
+      examples:
+        - "Write a Python function to sort a list"
+        - "How do I implement a binary search tree in Rust?"
+        - "Debug this JavaScript code that throws a TypeError"
+        - "Explain the difference between async/await and promises"
+        - "Write a SQL query to find duplicate rows"
+        - "What is the time complexity of quicksort?"
+        - "How do I use Docker to containerise a Node.js app?"
+        - "Implement a REST API endpoint in FastAPI"
+
+    - name: science
+      # Route natural science / biology / physics questions here
+      workers:
+        - "http://localhost:8020"
+      examples:
+        - "Explain the process of photosynthesis"
+        - "What is the difference between mitosis and meiosis?"
+        - "Describe Newton's laws of motion"
+        - "How does quantum entanglement work?"
+        - "What causes a solar eclipse?"
+        - "Explain the theory of general relativity"
+        - "How are proteins synthesised in the cell?"
+        - "What is the role of ATP in cellular respiration?"

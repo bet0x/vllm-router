@@ -55,6 +55,30 @@ fn should_forward_header(name: &str) -> bool {
 /// Header names for W3C Trace Context (OpenTelemetry) propagation
 pub const TRACE_HEADER_NAMES: &[&str] = &["traceparent", "tracestate", "baggage"];
 
+/// Header names used by the vLLM Semantic Router (IRIS) for routing metadata.
+///
+/// These headers are injected by the Semantic Router (sitting in front of this router)
+/// and carry routing decisions / semantic metadata that can influence:
+/// - Worker affinity (cluster-id → use as consistent-hash key)
+/// - Cache decisions (score → high score means likely cache hit)
+/// - Observability (routing decisions visible to workers)
+///
+/// Refs:
+///   <https://blog.vllm.ai/2026/01/05/vllm-sr-iris.html>
+///   <https://github.com/vllm-project/semantic-router>
+pub const SEMANTIC_ROUTER_HEADER_NAMES: &[&str] = &[
+    // Cluster / category assigned by the Semantic Router — used as affinity key.
+    "x-semantic-cluster-id",
+    // Similarity score (0.0–1.0) between the request and the closest cached query.
+    "x-semantic-score",
+    // The specific cache key selected by the Semantic Router.
+    "x-semantic-cache-key",
+    // Identifier of the Semantic Router node that made the decision.
+    "x-routed-by",
+    // Preferred model decided by the Semantic Router (may differ from request.model).
+    "x-model-preference",
+];
+
 /// Propagate OpenTelemetry trace headers to a reqwest RequestBuilder
 ///
 /// This enables distributed tracing across service boundaries by forwarding
@@ -64,6 +88,28 @@ pub fn propagate_trace_headers(
     headers: Option<&HeaderMap>,
 ) -> reqwest::RequestBuilder {
     propagate_headers(request, headers, TRACE_HEADER_NAMES)
+}
+
+/// Propagate vLLM Semantic Router metadata headers to a reqwest RequestBuilder.
+///
+/// Headers injected by the Semantic Router (e.g. `x-semantic-cluster-id`,
+/// `x-semantic-score`) are forwarded to the selected backend worker so that:
+/// - Workers can log / observe the semantic routing decision.
+/// - Backend metrics can be correlated with semantic clusters.
+pub fn propagate_semantic_headers(
+    request: reqwest::RequestBuilder,
+    headers: Option<&HeaderMap>,
+) -> reqwest::RequestBuilder {
+    propagate_headers(request, headers, SEMANTIC_ROUTER_HEADER_NAMES)
+}
+
+/// Propagate both trace and Semantic Router headers in one call.
+pub fn propagate_all_routing_headers(
+    request: reqwest::RequestBuilder,
+    headers: Option<&HeaderMap>,
+) -> reqwest::RequestBuilder {
+    let request = propagate_trace_headers(request, headers);
+    propagate_semantic_headers(request, headers)
 }
 
 /// Propagate specific headers from incoming request to outgoing reqwest RequestBuilder

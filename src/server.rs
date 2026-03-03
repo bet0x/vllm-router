@@ -7,9 +7,10 @@ use crate::{
     middleware::{self, QueuedRequest, TokenBucket},
     policies::PolicyRegistry,
     protocols::{
+        anthropic::{from_openai_response, translate_sse_chunk, MessagesRequest, SseState},
         spec::{
-            ChatCompletionRequest, CompletionRequest, EmbeddingRequest, GenerateRequest,
-            RerankRequest, ResponsesRequest, V1RerankReqInput,
+            ChatCompletionRequest, ChatCompletionResponse, CompletionRequest, EmbeddingRequest,
+            GenerateRequest, RerankRequest, ResponsesRequest, V1RerankReqInput,
         },
         worker_spec::{WorkerApiResponse, WorkerConfigRequest, WorkerErrorResponse},
     },
@@ -21,6 +22,7 @@ use crate::{
     tokenizer::{factory as tokenizer_factory, traits::Tokenizer},
 };
 use axum::{
+    body::Body,
     extract::{Path, Query, Request, State},
     http::StatusCode,
     response::{IntoResponse, Response},
@@ -76,10 +78,13 @@ impl AppContext {
                         .to_string()
                 })?;
 
-            // Initialize tokenizer
+            // Initialize tokenizer (use model map if configured)
             Some(
-                tokenizer_factory::create_tokenizer(&tokenizer_path)
-                    .map_err(|e| format!("Failed to create tokenizer: {e}"))?,
+                tokenizer_factory::create_tokenizer_with_map(
+                    &tokenizer_path,
+                    &router_config.tokenizer_model_map,
+                )
+                .map_err(|e| format!("Failed to create tokenizer: {e}"))?,
             )
         } else {
             // HTTP mode doesn't need tokenizer
@@ -261,7 +266,10 @@ async fn v1_chat_completions(
         return response;
     }
 
-    state.router.route_chat(Some(&headers), &body, None).await
+    state
+        .router
+        .route_chat(Some(&headers), &body, body.model.as_deref())
+        .await
 }
 
 async fn v1_completions(
@@ -275,7 +283,7 @@ async fn v1_completions(
 
     state
         .router
-        .route_completion(Some(&headers), &body, None)
+        .route_completion(Some(&headers), &body, body.model.as_deref())
         .await
 }
 
@@ -288,7 +296,10 @@ async fn rerank(
         return response;
     }
 
-    state.router.route_rerank(Some(&headers), &body, None).await
+    state
+        .router
+        .route_rerank(Some(&headers), &body, Some(&body.model))
+        .await
 }
 
 async fn v1_rerank(
@@ -317,7 +328,7 @@ async fn v1_responses(
 
     state
         .router
-        .route_responses(Some(&headers), &body, None)
+        .route_responses(Some(&headers), &body, body.model.as_deref())
         .await
 }
 
@@ -332,8 +343,132 @@ async fn v1_embeddings(
 
     state
         .router
-        .route_embeddings(Some(&headers), &body, None)
+        .route_embeddings(Some(&headers), &body, body.model.as_deref())
         .await
+}
+
+/// POST /v1/messages — Anthropic Messages API (T-24)
+///
+/// For non-streaming requests: translate Anthropic → OpenAI, forward to route_chat,
+/// translate the OpenAI response back to Anthropic format.
+///
+/// For streaming requests: forward to route_chat with stream=true, then transform
+/// each OpenAI SSE chunk into one or more Anthropic SSE events.
+async fn v1_messages(
+    State(state): State<Arc<AppState>>,
+    headers: http::HeaderMap,
+    Json(body): Json<MessagesRequest>,
+) -> Response {
+    if let Err(response) = authorize_request(&state, &headers).await {
+        return response;
+    }
+
+    let original_model = body.model.clone();
+    let is_stream = body.stream;
+
+    // Translate to OpenAI chat request
+    let oai_req = body.to_openai_chat();
+
+    if !is_stream {
+        // Non-streaming path: call route_chat, collect body, translate back
+        let upstream = state
+            .router
+            .route_chat(Some(&headers), &oai_req, Some(&original_model))
+            .await;
+
+        if !upstream.status().is_success() {
+            return upstream;
+        }
+
+        let (parts, up_body) = upstream.into_parts();
+        let bytes = match axum::body::to_bytes(up_body, 32 * 1024 * 1024).await {
+            Ok(b) => b,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    format!("Failed to read upstream body: {e}"),
+                )
+                    .into_response()
+            }
+        };
+
+        match serde_json::from_slice::<ChatCompletionResponse>(&bytes) {
+            Ok(oai_resp) => {
+                let anthropic_resp = from_openai_response(&oai_resp, &original_model);
+                let mut response = Json(anthropic_resp).into_response();
+                // Forward status code from upstream
+                *response.status_mut() = parts.status;
+                response
+            }
+            Err(_) => {
+                // Could not parse as ChatCompletionResponse — return raw upstream body
+                Response::from_parts(parts, Body::from(bytes))
+            }
+        }
+    } else {
+        // Streaming path: route_chat with stream=true, translate each SSE chunk
+        let upstream = state
+            .router
+            .route_chat(Some(&headers), &oai_req, Some(&original_model))
+            .await;
+
+        if !upstream.status().is_success() {
+            return upstream;
+        }
+
+        let (mut parts, up_body) = upstream.into_parts();
+
+        // Override content-type to Anthropic's event-stream
+        parts.headers.insert(
+            http::header::CONTENT_TYPE,
+            http::HeaderValue::from_static("text/event-stream"),
+        );
+
+        // Spawn a task that reads the upstream SSE stream and translates each chunk
+        let msg_id = uuid::Uuid::new_v4().simple().to_string();
+        let model = original_model.clone();
+        let (tx, rx) =
+            tokio::sync::mpsc::channel::<Result<bytes::Bytes, std::io::Error>>(64);
+
+        tokio::spawn(async move {
+            use futures_util::StreamExt;
+            let mut upstream_stream = up_body.into_data_stream();
+            let mut state_machine = SseState::default();
+            let mut buffer = String::new();
+
+            while let Some(chunk) = upstream_stream.next().await {
+                let chunk = match chunk {
+                    Ok(c) => c,
+                    Err(_) => break,
+                };
+                buffer.push_str(&String::from_utf8_lossy(&chunk));
+
+                // Process complete lines from the buffer
+                while let Some(newline_pos) = buffer.find('\n') {
+                    let line = buffer[..newline_pos].trim_end_matches('\r').to_string();
+                    buffer = buffer[newline_pos + 1..].to_string();
+
+                    if let Some(data) = line.strip_prefix("data: ") {
+                        let events =
+                            translate_sse_chunk(data, &model, &msg_id, &mut state_machine);
+                        for event in events {
+                            if tx
+                                .send(Ok(bytes::Bytes::from(event)))
+                                .await
+                                .is_err()
+                            {
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+        let body = Body::from_stream(stream);
+        Response::from_parts(parts, body)
+    }
 }
 
 async fn v1_responses_get(
@@ -715,6 +850,7 @@ pub fn build_app(
         .route("/v1/rerank", post(v1_rerank))
         .route("/v1/responses", post(v1_responses))
         .route("/v1/embeddings", post(v1_embeddings))
+        .route("/v1/messages", post(v1_messages))
         .route("/v1/responses/{response_id}", get(v1_responses_get))
         .route(
             "/v1/responses/{response_id}/cancel",
@@ -902,7 +1038,48 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
                 }
             }
 
-            // TODO: Add gRPC routers once we have dynamic tokenizer loading
+            // 3. gRPC Regular Router
+            match RouterFactory::create_grpc_router(
+                &[], // Empty worker list - workers added later via service discovery
+                &app_context.router_config.policy,
+                &app_context,
+            )
+            .await
+            {
+                Ok(grpc_regular) => {
+                    info!("Created gRPC Regular router");
+                    router_manager.register_router(
+                        RouterId::new("grpc-regular".to_string()),
+                        Arc::from(grpc_regular),
+                    );
+                }
+                Err(e) => {
+                    warn!("Failed to create gRPC Regular router: {e}");
+                }
+            }
+
+            // 4. gRPC PD Router
+            match RouterFactory::create_grpc_pd_router(
+                &[], // Empty prefill list
+                &[], // Empty decode list
+                None,
+                None,
+                &app_context.router_config.policy,
+                &app_context,
+            )
+            .await
+            {
+                Ok(grpc_pd) => {
+                    info!("Created gRPC PD router");
+                    router_manager.register_router(
+                        RouterId::new("grpc-pd".to_string()),
+                        Arc::from(grpc_pd),
+                    );
+                }
+                Err(e) => {
+                    warn!("Failed to create gRPC PD router: {e}");
+                }
+            }
 
             info!(
                 "RouterManager initialized with {} routers",

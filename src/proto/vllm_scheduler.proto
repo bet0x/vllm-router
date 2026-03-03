@@ -26,6 +26,30 @@ service VllmScheduler {
 // Common Types
 // =====================
 
+// Session affinity parameters propagated from the router to the scheduler.
+message SessionParams {
+  // Opaque session identifier extracted from x-session-id or body.session_params.
+  string session_id = 1;
+  // User identifier extracted from x-user-id or body.user.
+  string user_id = 2;
+  // Hint to the scheduler: how many tokens of KV cache to preserve for this
+  // session.  Zero means "use default scheduler policy".
+  int32 max_cached_history_tokens = 3;
+}
+
+// Metadata about the model being served.  Included in Generate/Embed requests
+// so that the scheduler can validate or log tokenizer information.
+message ModelInfo {
+  // Short model identifier (e.g. "meta-llama/Meta-Llama-3-8B").
+  string model_id = 1;
+  // Local path or HuggingFace repo where the model weights are stored.
+  string model_path = 2;
+  // Vocabulary size as reported by the router's tokenizer.
+  int64 vocab_size = 3;
+  // Tokenizer family: "huggingface", "sentencepiece", "tiktoken", or "mock".
+  string tokenizer_type = 4;
+}
+
 // Sampling parameters matching VLLM's SamplingParams
 message SamplingParams {
   float temperature = 1;
@@ -122,6 +146,12 @@ message GenerateRequest {
 
   // For load balancing
   int32 dp_balance_id = 17;
+
+  // Session affinity hint from the router.
+  SessionParams session_params = 18;
+
+  // Model metadata for validation and logging.
+  ModelInfo model_info = 19;
 }
 
 message TokenizedInput {
@@ -267,6 +297,12 @@ message EmbedRequest {
   // For cross-encoder requests
   bool is_cross_encoder = 9;
   repeated string texts = 10;  // For cross-encoder batch
+
+  // Session affinity hint from the router.
+  SessionParams session_params = 11;
+
+  // Model metadata for validation and logging.
+  ModelInfo model_info = 12;
 }
 
 message EmbedResponse {

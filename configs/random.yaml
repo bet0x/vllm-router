@@ -1,0 +1,21 @@
+# Random routing
+#
+# Picks a worker at random on each request.
+# Statistically equivalent to round-robin under high load.
+# Useful when you want to avoid strict ordering (e.g. burst traffic).
+#
+# Start:
+#   cargo run -- --config-file configs/random.yaml
+
+host: "0.0.0.0"
+port: 3000
+log_level: info
+
+mode:
+  type: regular
+  worker_urls:
+    - "http://localhost:8010"
+    - "http://localhost:8020"
+
+policy:
+  type: random

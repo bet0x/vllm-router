@@ -251,6 +251,26 @@ pub fn init_metrics() {
         "vllm_tokenizer_factory_load_duration_seconds",
         "Time to load and initialize tokenizer"
     );
+
+    // Per-worker routing counters (covers all routing methods)
+    describe_counter!(
+        "vllm_router_worker_requests_total",
+        "Total requests forwarded to each worker, labelled by route, worker and routing method (cluster/policy)"
+    );
+    // Per-worker request duration
+    describe_histogram!(
+        "vllm_router_worker_request_duration_seconds",
+        "Request duration per worker and route"
+    );
+    // Semantic cluster routing counters
+    describe_counter!(
+        "vllm_router_cluster_requests_total",
+        "Requests routed via semantic cluster matching, labelled by cluster name and worker"
+    );
+    describe_counter!(
+        "vllm_router_cluster_fallback_total",
+        "Requests that fell below the similarity threshold and used the default policy instead"
+    );
 }
 
 pub fn start_prometheus(config: PrometheusConfig) {
@@ -505,6 +525,37 @@ impl RouterMetrics {
         counter!("vllm_router_cb_outcomes_total",
             "worker" => worker.to_string(),
             "outcome" => outcome.to_string()
+        )
+        .increment(1);
+    }
+
+    // Per-worker routing metrics
+
+    /// Called whenever a request is forwarded to a worker.
+    /// `routing` is `"cluster"` or `"policy"`.
+    pub fn record_worker_request(route: &str, worker: &str, routing: &str) {
+        counter!("vllm_router_worker_requests_total",
+            "route"   => route.to_string(),
+            "worker"  => worker.to_string(),
+            "routing" => routing.to_string()
+        )
+        .increment(1);
+    }
+
+    /// Called when a request was routed to a specific semantic cluster.
+    pub fn record_cluster_request(cluster: &str, worker: &str) {
+        counter!("vllm_router_cluster_requests_total",
+            "cluster" => cluster.to_string(),
+            "worker"  => worker.to_string()
+        )
+        .increment(1);
+    }
+
+    /// Called when semantic cluster matching fell below threshold and the
+    /// default load-balancing policy was used instead.
+    pub fn record_cluster_fallback(route: &str) {
+        counter!("vllm_router_cluster_fallback_total",
+            "route" => route.to_string()
         )
         .increment(1);
     }

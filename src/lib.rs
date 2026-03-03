@@ -1,4 +1,5 @@
 use pyo3::prelude::*;
+pub mod cache;
 pub mod config;
 pub mod logging;
 use std::collections::HashMap;
@@ -243,9 +244,12 @@ impl Router {
             enable_igw: self.enable_igw,
             model_path: self.model_path.clone(),
             tokenizer_path: self.tokenizer_path.clone(),
+            tokenizer_model_map: std::collections::HashMap::new(),
             history_backend: config::HistoryBackend::Memory,
             enable_profiling: false, // Profiling disabled in Python binding by default
             profile_timeout_secs: 10, // Default profiling timeout
+            semantic_cache: None,
+            semantic_cluster: None,
         })
     }
 }

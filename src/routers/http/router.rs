@@ -44,6 +44,18 @@ pub struct Router {
     circuit_breaker_config: CircuitBreakerConfig,
     _worker_loads: Arc<tokio::sync::watch::Receiver<HashMap<String, isize>>>,
     _load_monitor_handle: Option<Arc<tokio::task::JoinHandle<()>>>,
+    /// Exact-match response cache for non-streaming requests.
+    response_cache: Arc<crate::cache::ResponseCache>,
+    /// Semantic similarity cache (T-12).  `None` when the feature is disabled.
+    semantic_cache: Option<Arc<crate::cache::semantic::SemanticCache>>,
+    /// Base URL of the embeddings endpoint used for semantic caching/cluster routing.
+    embeddings_url: Option<String>,
+    /// Model name sent in embedding requests.
+    embeddings_model: String,
+    /// Timeout in milliseconds for each embedding HTTP call.
+    embedding_timeout_ms: u64,
+    /// Semantic cluster routing policy.  `None` when cluster routing is disabled.
+    semantic_cluster: Option<Arc<crate::policies::SemanticClusterPolicy>>,
 }
 
 impl Router {
@@ -89,12 +101,13 @@ impl Router {
             window_duration: Duration::from_secs(circuit_breaker_config.window_duration_secs),
         };
 
-        // Register workers in the registry
-        // In IGW mode, we need to fetch model info from workers
+        // Register workers in the registry, fetching model_id from each worker.
         for url in &worker_urls {
-            // TODO: In IGW mode, fetch model_id from worker's /get_model_info endpoint
-            // For now, create worker without model_id
+            let model_id = Self::fetch_model_id_from_server(&ctx.client, url).await;
+            let mut labels = std::collections::HashMap::new();
+            labels.insert("model_id".to_string(), model_id);
             let worker = BasicWorker::new(url.clone(), WorkerType::Regular)
+                .with_labels(labels)
                 .with_circuit_breaker_config(core_cb_config.clone())
                 .with_health_config(HealthConfig {
                     timeout_secs: ctx.router_config.health_check.timeout_secs,
@@ -150,7 +163,68 @@ impl Router {
             None
         };
 
-        Ok(Router {
+        // Resolve embeddings URL and model: prefer semantic_cache config, fall back to
+        // semantic_cluster config if present.
+        let embeddings_url = ctx
+            .router_config
+            .semantic_cache
+            .as_ref()
+            .and_then(|sc| sc.embeddings_url.clone())
+            .or_else(|| {
+                ctx.router_config
+                    .semantic_cluster
+                    .as_ref()
+                    .and_then(|sc| sc.embeddings_url.clone())
+            });
+
+        let embeddings_model = ctx
+            .router_config
+            .semantic_cache
+            .as_ref()
+            .map(|sc| sc.embeddings_model.clone())
+            .unwrap_or_else(|| {
+                ctx.router_config
+                    .semantic_cluster
+                    .as_ref()
+                    .map(|sc| sc.embeddings_model.clone())
+                    .unwrap_or_else(|| "default".to_string())
+            });
+
+        let embedding_timeout_ms = ctx
+            .router_config
+            .semantic_cache
+            .as_ref()
+            .map(|sc| sc.embedding_timeout_ms)
+            .unwrap_or_else(|| {
+                ctx.router_config
+                    .semantic_cluster
+                    .as_ref()
+                    .map(|sc| sc.embedding_timeout_ms)
+                    .unwrap_or(500)
+            });
+
+        // Build semantic cluster policy (computes centroids via the embeddings endpoint).
+        let semantic_cluster = if let Some(sc_config) = &ctx.router_config.semantic_cluster {
+            let url = sc_config
+                .embeddings_url
+                .as_deref()
+                .or(embeddings_url.as_deref());
+            match url {
+                Some(url) => {
+                    Self::build_semantic_clusters(sc_config, url, &ctx.client).await
+                }
+                None => {
+                    warn!(
+                        "semantic_cluster config present but no embeddings_url — cluster routing disabled"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        let router = Router {
             worker_registry: ctx.worker_registry.clone(),
             policy_registry: ctx.policy_registry.clone(),
             client: ctx.client.clone(),
@@ -164,7 +238,253 @@ impl Router {
             circuit_breaker_config: core_cb_config,
             _worker_loads: worker_loads,
             _load_monitor_handle: load_monitor_handle,
-        })
+            // 1 024 entries, 60-second TTL. Only non-streaming responses are stored.
+            response_cache: Arc::new(crate::cache::ResponseCache::new(1024, 60)),
+            // Semantic similarity cache — only enabled when embeddings_url is configured.
+            semantic_cache: ctx
+                .router_config
+                .semantic_cache
+                .as_ref()
+                .and_then(|sc| sc.embeddings_url.as_ref())
+                .map(|_| {
+                    let sc = ctx.router_config.semantic_cache.as_ref().unwrap();
+                    Arc::new(crate::cache::semantic::SemanticCache::new(
+                        sc.max_entries,
+                        sc.ttl_secs,
+                        sc.threshold,
+                    ))
+                }),
+            embeddings_url: embeddings_url.clone(),
+            embeddings_model: embeddings_model.clone(),
+            embedding_timeout_ms,
+            semantic_cluster,
+        };
+
+        if let Some(ref url) = embeddings_url {
+            info!(embeddings_url = url, embeddings_model = %embeddings_model, "embeddings endpoint configured");
+        }
+
+        Ok(router)
+    }
+
+    /// Build a [`SemanticClusterPolicy`] by fetching embeddings for each cluster's
+    /// example prompts and averaging them into a normalised centroid vector.
+    async fn build_semantic_clusters(
+        config: &crate::config::types::SemanticClusterConfig,
+        embeddings_url: &str,
+        client: &Client,
+    ) -> Option<Arc<crate::policies::SemanticClusterPolicy>> {
+        use std::time::Duration;
+
+        let timeout = Duration::from_millis(config.embedding_timeout_ms);
+        let endpoint = format!("{}/v1/embeddings", embeddings_url.trim_end_matches('/'));
+        let mut parts: Vec<(String, Vec<f32>, Vec<String>)> = Vec::new();
+
+        for cluster_def in &config.clusters {
+            let mut embeddings: Vec<Vec<f32>> = Vec::new();
+
+            for example in &cluster_def.examples {
+                let resp = client
+                    .post(&endpoint)
+                    .json(&serde_json::json!({
+                        "model": config.embeddings_model,
+                        "input": example,
+                    }))
+                    .timeout(timeout)
+                    .send()
+                    .await;
+
+                let emb = match resp {
+                    Ok(r) if r.status().is_success() => {
+                        r.json::<serde_json::Value>().await.ok().and_then(|j| {
+                            let arr = j.get("data")?.get(0)?.get("embedding")?.as_array()?;
+                            let v: Vec<f32> = arr
+                                .iter()
+                                .filter_map(|x| x.as_f64().map(|f| f as f32))
+                                .collect();
+                            if v.is_empty() { None } else { Some(v) }
+                        })
+                    }
+                    _ => None,
+                };
+
+                match emb {
+                    Some(v) => embeddings.push(v),
+                    None => {
+                        warn!(
+                            "Cluster '{}': failed to embed example '{}'",
+                            cluster_def.name, example
+                        );
+                    }
+                }
+            }
+
+            if embeddings.is_empty() {
+                warn!(
+                    "Cluster '{}' has no valid embeddings — skipping",
+                    cluster_def.name
+                );
+                continue;
+            }
+
+            // Average and L2-normalise → centroid.
+            let dim = embeddings[0].len();
+            let mut centroid = vec![0.0f32; dim];
+            for emb in &embeddings {
+                for (c, v) in centroid.iter_mut().zip(emb.iter()) {
+                    *c += v;
+                }
+            }
+            let n = embeddings.len() as f32;
+            for c in centroid.iter_mut() {
+                *c /= n;
+            }
+            let norm: f32 = centroid.iter().map(|x| x * x).sum::<f32>().sqrt();
+            if norm > 0.0 {
+                for c in centroid.iter_mut() {
+                    *c /= norm;
+                }
+            }
+
+            info!(
+                "Semantic cluster '{}' ready — {} examples → {} workers",
+                cluster_def.name,
+                embeddings.len(),
+                cluster_def.workers.len()
+            );
+            parts.push((
+                cluster_def.name.clone(),
+                centroid,
+                cluster_def.workers.clone(),
+            ));
+        }
+
+        if parts.is_empty() {
+            warn!("No semantic clusters could be initialised — cluster routing disabled");
+            return None;
+        }
+
+        Some(Arc::new(
+            crate::policies::SemanticClusterPolicy::from_parts(parts, config.threshold),
+        ))
+    }
+
+    /// Extract a plain-text representation of the request body for embedding.
+    ///
+    /// For chat requests the concatenated message contents are returned.
+    /// For completion requests the `prompt` field is used.
+    /// Falls back to the canonical JSON string when neither is available.
+    fn extract_request_text(body: &serde_json::Value) -> String {
+        // Chat messages: concatenate role+content pairs
+        if let Some(messages) = body.get("messages").and_then(|m| m.as_array()) {
+            let text: String = messages
+                .iter()
+                .filter_map(|m| {
+                    // content may be a string or an array of content parts
+                    let content = m.get("content")?;
+                    if let Some(s) = content.as_str() {
+                        return Some(s.to_string());
+                    }
+                    if let Some(parts) = content.as_array() {
+                        let combined: String = parts
+                            .iter()
+                            .filter_map(|p| p.get("text").and_then(|t| t.as_str()))
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        if !combined.is_empty() {
+                            return Some(combined);
+                        }
+                    }
+                    None
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            if !text.is_empty() {
+                return text;
+            }
+        }
+        // Completion prompt
+        if let Some(prompt) = body.get("prompt").and_then(|p| p.as_str()) {
+            return prompt.to_string();
+        }
+        // Last resort: full canonical JSON
+        serde_json::to_string(body).unwrap_or_default()
+    }
+
+    /// Call the configured embeddings endpoint and return the embedding vector.
+    ///
+    /// Returns `None` when the semantic cache is disabled, the HTTP call fails,
+    /// or the response cannot be parsed.
+    async fn get_embedding(&self, text: &str) -> Option<Vec<f32>> {
+        let url = self.embeddings_url.as_ref()?;
+        let endpoint = format!("{}/v1/embeddings", url.trim_end_matches('/'));
+        let resp = match self
+            .client
+            .post(&endpoint)
+            .json(&serde_json::json!({
+                "model": self.embeddings_model,
+                "input": text,
+            }))
+            .timeout(Duration::from_millis(self.embedding_timeout_ms))
+            .send()
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                warn!(endpoint, error = %e, "embedding request failed");
+                return None;
+            }
+        };
+
+        if !resp.status().is_success() {
+            warn!(endpoint, status = resp.status().as_u16(), "embedding request returned error status");
+            return None;
+        }
+        let json: serde_json::Value = resp.json().await.ok()?;
+        let embedding: Vec<f32> = json
+            .get("data")?
+            .get(0)?
+            .get("embedding")?
+            .as_array()?
+            .iter()
+            .filter_map(|v| v.as_f64().map(|f| f as f32))
+            .collect();
+
+        if embedding.is_empty() {
+            None
+        } else {
+            Some(embedding)
+        }
+    }
+
+    /// Fetch model_id from a worker's /get_server_info endpoint.
+    /// Returns "unknown" if the request fails or the field is absent.
+    async fn fetch_model_id_from_server(client: &reqwest::Client, url: &str) -> String {
+        let info_url = format!("{}/get_server_info", url.trim_end_matches('/'));
+        match client
+            .get(&info_url)
+            .timeout(Duration::from_secs(5))
+            .send()
+            .await
+        {
+            Ok(resp) if resp.status().is_success() => {
+                match resp.json::<serde_json::Value>().await {
+                    Ok(json) => json
+                        .get("model_id")
+                        .and_then(|v| v.as_str())
+                        .filter(|s| !s.is_empty())
+                        .or_else(|| {
+                            json.get("model_path")
+                                .and_then(|v| v.as_str())
+                                .and_then(|p| p.split('/').next_back())
+                        })
+                        .unwrap_or("unknown")
+                        .to_string(),
+                    Err(_) => "unknown".to_string(),
+                }
+            }
+            _ => "unknown".to_string(),
+        }
     }
 
     /// Get the current list of worker URLs
@@ -283,34 +603,34 @@ impl Router {
             let results = futures::future::join_all(health_checks).await;
 
             let mut unhealthy_hosts = Vec::new();
-            let mut healthy_host_count = 0;
+            let mut all_healthy = true;
 
             for result in results {
                 match result {
                     Ok(None) => {
-                        healthy_host_count += 1;
                         // Host is healthy
                     }
                     Ok(Some((url, reason))) => {
+                        all_healthy = false;
                         unhealthy_hosts.push((url, reason));
                     }
                     Err(e) => {
+                        all_healthy = false;
                         unhealthy_hosts.push(("unknown".to_string(), format!("task error: {}", e)));
                     }
                 }
             }
 
-            if healthy_host_count > 0 {
+            if all_healthy {
                 info!(
-                    "{} out of {} unique hosts are healthy (representing {} workers)",
-                    healthy_host_count,
+                    "All {} unique hosts are healthy (representing {} workers)",
                     unique_hosts_vec.len(),
                     worker_urls.len()
                 );
                 return Ok(());
             } else {
                 debug!(
-                   "Waiting for at least 1 of {} unique hosts to become healthy ({} unhealthy: {:?})",
+                    "Waiting for {} unique hosts to become healthy ({} unhealthy: {:?})",
                     unique_hosts_vec.len(),
                     unhealthy_hosts.len(),
                     unhealthy_hosts
@@ -468,16 +788,40 @@ impl Router {
         })
     }
 
-    /// Select worker for a specific model considering circuit breaker state
+    /// Select worker for a specific model considering circuit breaker state.
+    ///
+    /// When `preferred` is `Some` and still available (healthy + circuit closed),
+    /// it is returned immediately without consulting the load-balancing policy.
+    /// This allows semantic cluster routing to steer requests to a specific worker
+    /// while transparently falling back to the regular policy when that worker is
+    /// unhealthy or the circuit is open.
     fn select_worker_for_model(
         &self,
         model_id: Option<&str>,
         text: Option<&str>,
         headers: Option<&HeaderMap>,
+        preferred: Option<&Arc<dyn Worker>>,
     ) -> Option<Arc<dyn Worker>> {
-        // Get workers for the specified model (O(1) lookup if model_id is provided)
+        // Fast-path: use the cluster-selected worker if it is still available.
+        if let Some(pw) = preferred {
+            if pw.is_available() {
+                return Some(pw.clone());
+            }
+        }
+
+        // Get workers for the specified model (O(1) lookup if model_id is provided).
+        // Fall back to all workers when no workers are registered under that model_id
+        // — this handles the common case where workers report "unknown" during startup
+        // or where the client sends a model name that doesn't exactly match the registry.
         let workers = match model_id {
-            Some(model) => self.worker_registry.get_by_model_fast(model),
+            Some(model) => {
+                let by_model = self.worker_registry.get_by_model_fast(model);
+                if by_model.is_empty() {
+                    self.worker_registry.get_all()
+                } else {
+                    by_model
+                }
+            }
             None => self.worker_registry.get_all(),
         };
 
@@ -503,12 +847,165 @@ impl Router {
         Some(available[idx].clone())
     }
 
+    /// Route a request through the exact-match cache for non-streaming requests.
+    ///
+    /// - If `is_stream` is true, bypasses the cache entirely (streaming responses
+    ///   cannot be buffered and replayed).
+    /// - On a cache hit, returns the stored body immediately.
+    /// - On a cache miss, delegates to `route_typed_request`. If the response is
+    ///   successful (2xx), the response body is buffered, stored in the cache, and
+    ///   a new Response is constructed from the bytes.
+    async fn route_with_cache<T: GenerationRequest + serde::Serialize + Clone>(
+        &self,
+        headers: Option<&HeaderMap>,
+        typed_req: &T,
+        route: &str,
+        model_id: Option<&str>,
+        is_stream: bool,
+    ) -> Response {
+        use axum::http::header::CONTENT_TYPE;
+
+        if !is_stream {
+            if let Ok(json) = serde_json::to_value(typed_req) {
+                let cache_key = crate::cache::ResponseCache::compute_key(&json);
+
+                // 1. Exact-match cache hit — return immediately without touching a worker
+                if let Some((cached_body, ct)) = self.response_cache.get(cache_key) {
+                    let mut resp = Response::new(axum::body::Body::from(cached_body));
+                    *resp.status_mut() = StatusCode::OK;
+                    if let Some(ct_str) = ct {
+                        if let Ok(val) = ct_str.parse::<axum::http::HeaderValue>() {
+                            resp.headers_mut().insert(CONTENT_TYPE, val);
+                        }
+                    }
+                    return resp;
+                }
+
+                // 2. Compute embedding when semantic cache or cluster routing is active.
+                // The same vector is reused for both purposes to avoid double-fetching.
+                let mut query_embedding: Option<Vec<f32>> = None;
+                if self.semantic_cache.is_some() || self.semantic_cluster.is_some() {
+                    let text = Self::extract_request_text(&json);
+                    debug!(text_len = text.len(), has_cluster = self.semantic_cluster.is_some(), "fetching embedding for routing");
+                    query_embedding = self.get_embedding(&text).await;
+                    debug!(got_embedding = query_embedding.is_some(), "embedding fetch done");
+                }
+
+                // 2a. Semantic similarity cache lookup (T-12).
+                if let (Some(emb), Some(sem_cache)) =
+                    (query_embedding.as_ref(), &self.semantic_cache)
+                {
+                    if let Some((cached_body, ct)) = sem_cache.find_similar(emb) {
+                        debug!("Semantic cache hit (similarity ≥ {})", sem_cache.threshold);
+                        let mut resp = Response::new(axum::body::Body::from(cached_body));
+                        *resp.status_mut() = StatusCode::OK;
+                        if let Some(ct_str) = ct {
+                            if let Ok(val) = ct_str.parse::<axum::http::HeaderValue>() {
+                                resp.headers_mut().insert(CONTENT_TYPE, val);
+                            }
+                        }
+                        return resp;
+                    }
+                }
+
+                // 2b. Semantic cluster routing — pick the best-matching cluster worker.
+                // Returns (worker, cluster_name) so the cluster name can be logged + metered.
+                let cluster_hit: Option<(Arc<dyn Worker>, &str)> =
+                    if let (Some(emb), Some(sc)) =
+                        (query_embedding.as_ref(), &self.semantic_cluster)
+                    {
+                        let all = match model_id {
+                            Some(m) => {
+                                let by_model = self.worker_registry.get_by_model_fast(m);
+                                if by_model.is_empty() {
+                                    self.worker_registry.get_all()
+                                } else {
+                                    by_model
+                                }
+                            }
+                            None => self.worker_registry.get_all(),
+                        };
+                        let available: Vec<Arc<dyn Worker>> =
+                            all.iter().filter(|w| w.is_available()).cloned().collect();
+                        sc.route(emb, &available).inspect(|(w, cluster_name)| {
+                            debug!(cluster = cluster_name, worker = w.url(), "semantic cluster selected");
+                        })
+                    } else {
+                        None
+                    };
+
+                let cluster_worker = cluster_hit.as_ref().map(|(w, _)| w.clone());
+
+                // 3. Both caches missed — forward to backend
+                let upstream = self
+                    .route_typed_request(
+                        headers,
+                        typed_req,
+                        route,
+                        model_id,
+                        cluster_worker,
+                        cluster_hit.as_ref().map(|(_, name)| *name),
+                    )
+                    .await;
+
+                if upstream.status().is_success() {
+                    let (parts, body) = upstream.into_parts();
+                    let ct = parts
+                        .headers
+                        .get(CONTENT_TYPE)
+                        .and_then(|v| v.to_str().ok())
+                        .map(|s| s.to_string());
+
+                    // Buffer the body (cap at 8 MB to avoid huge responses filling the cache)
+                    const MAX_CACHE_BODY: usize = 8 * 1024 * 1024;
+                    match axum::body::to_bytes(body, MAX_CACHE_BODY).await {
+                        Ok(bytes) => {
+                            // Store in exact-match cache
+                            self.response_cache
+                                .insert(cache_key, bytes.clone(), ct.clone());
+                            // Also store in semantic cache when an embedding is available
+                            if let (Some(sem_cache), Some(emb)) =
+                                (&self.semantic_cache, query_embedding)
+                            {
+                                sem_cache.insert(emb, bytes.clone(), ct);
+                            }
+                            // Rebuild the response from the buffered bytes
+                            let resp =
+                                Response::from_parts(parts, axum::body::Body::from(bytes));
+                            return resp;
+                        }
+                        Err(_) => {
+                            // Body too large or read error — rebuild a minimal error response
+                            return (
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                "Failed to buffer response for caching",
+                            )
+                                .into_response();
+                        }
+                    }
+                }
+
+                return upstream;
+            }
+        }
+
+        // Streaming or JSON serialisation failure — skip cache (no cluster hint)
+        self.route_typed_request(headers, typed_req, route, model_id, None, None)
+            .await
+    }
+
     pub async fn route_typed_request<T: GenerationRequest + serde::Serialize + Clone>(
         &self,
         headers: Option<&HeaderMap>,
         typed_req: &T,
         route: &str,
         model_id: Option<&str>,
+        // Optional cluster-selected worker. Passed to select_worker_for_model as a
+        // "preferred" hint — used when available, falls back to policy otherwise.
+        preferred_worker: Option<Arc<dyn Worker>>,
+        // Name of the semantic cluster that selected `preferred_worker`, if any.
+        // Used for logging and Prometheus metrics.
+        cluster_name: Option<&str>,
     ) -> Response {
         let start = Instant::now();
         let is_stream = typed_req.is_stream();
@@ -518,10 +1015,16 @@ impl Router {
             &self.retry_config,
             // operation per attempt
             |_: u32| async {
-                let worker = match self.select_worker_for_model(model_id, Some(&text), headers) {
+                let worker = match self.select_worker_for_model(
+                    model_id,
+                    Some(&text),
+                    headers,
+                    preferred_worker.as_ref(),
+                ) {
                     Some(w) => w,
                     None => {
                         RouterMetrics::record_request_error(route, "no_available_workers");
+                        warn!(route, model = model_id.unwrap_or("?"), "No available workers");
                         return (
                             StatusCode::SERVICE_UNAVAILABLE,
                             "No available workers (all circuits open or unhealthy)",
@@ -529,6 +1032,39 @@ impl Router {
                             .into_response();
                     }
                 };
+
+                let via_cluster = preferred_worker
+                    .as_ref()
+                    .map(|pw| pw.url() == worker.url())
+                    .unwrap_or(false);
+                let routing_method = if via_cluster { "cluster" } else { "policy" };
+
+                // Log the forwarding decision
+                if via_cluster {
+                    let cname = cluster_name.unwrap_or("?");
+                    info!(
+                        route,
+                        model = model_id.unwrap_or("?"),
+                        worker = worker.url(),
+                        cluster = cname,
+                        "→ cluster routing"
+                    );
+                    RouterMetrics::record_cluster_request(cname, worker.url());
+                } else {
+                    info!(
+                        route,
+                        model = model_id.unwrap_or("?"),
+                        worker = worker.url(),
+                        routing = routing_method,
+                        "→ policy routing"
+                    );
+                    // If a cluster was configured but this request fell back to policy,
+                    // record the fallback (cluster_name is Some when threshold was not met).
+                    if cluster_name.is_some() {
+                        RouterMetrics::record_cluster_fallback(route);
+                    }
+                }
+                RouterMetrics::record_worker_request(route, worker.url(), routing_method);
 
                 // Optional load tracking for cache-aware policy
                 // Get the policy for this model to check if it's cache-aware
@@ -594,12 +1130,27 @@ impl Router {
         )
         .await;
 
-        if response.status().is_success() {
-            let duration = start.elapsed();
+        let duration = start.elapsed();
+        let status = response.status();
+        if status.is_success() {
             RouterMetrics::record_request(route);
             RouterMetrics::record_generate_duration(duration);
-        } else if !is_retryable_status(response.status()) {
-            RouterMetrics::record_request_error(route, "non_retryable_error");
+            info!(
+                route,
+                status = status.as_u16(),
+                duration_ms = duration.as_millis(),
+                "← completed"
+            );
+        } else {
+            if !is_retryable_status(status) {
+                RouterMetrics::record_request_error(route, "non_retryable_error");
+            }
+            warn!(
+                route,
+                status = status.as_u16(),
+                duration_ms = duration.as_millis(),
+                "← failed"
+            );
         }
 
         response
@@ -977,9 +1528,13 @@ impl Router {
                                     continue;
                                 }
                                 info!("Added worker: {}", dp_url);
-                                // TODO: In IGW mode, fetch model_id from worker's /get_model_info endpoint
+                                let model_id =
+                                    Self::fetch_model_id_from_server(&client, dp_url).await;
+                                let mut labels = std::collections::HashMap::new();
+                                labels.insert("model_id".to_string(), model_id);
                                 let new_worker =
                                     BasicWorker::new(dp_url.to_string(), WorkerType::Regular)
+                                        .with_labels(labels)
                                         .with_circuit_breaker_config(
                                             self.circuit_breaker_config.clone(),
                                         );
@@ -1013,10 +1568,13 @@ impl Router {
                                 return Err(format!("Worker {} already exists", worker_url));
                             }
                             info!("Added worker: {}", worker_url);
-
-                            // TODO: In IGW mode, fetch model_id from worker's /get_model_info endpoint
+                            let model_id =
+                                Self::fetch_model_id_from_server(&client, worker_url).await;
+                            let mut labels = std::collections::HashMap::new();
+                            labels.insert("model_id".to_string(), model_id);
                             let new_worker =
                                 BasicWorker::new(worker_url.to_string(), WorkerType::Regular)
+                                    .with_labels(labels)
                                     .with_circuit_breaker_config(
                                         self.circuit_breaker_config.clone(),
                                     );
@@ -1326,6 +1884,71 @@ impl WorkerManagement for Router {
     }
 }
 
+impl Router {
+    async fn aggregate_models(&self) -> Response {
+        let worker_urls = self.worker_registry.get_all_urls();
+
+        if worker_urls.is_empty() {
+            return (StatusCode::SERVICE_UNAVAILABLE, "No workers available").into_response();
+        }
+
+        let client = &self.client;
+        let futures: Vec<_> = worker_urls
+            .into_iter()
+            .map(|worker_url| async move {
+                let url = format!("{}/v1/models", worker_url.trim_end_matches('/'));
+                match client.get(&url).send().await {
+                    Ok(res) => {
+                        if res.status().is_success() {
+                            match res.json::<serde_json::Value>().await {
+                                Ok(json) => Some(json),
+                                Err(e) => {
+                                    warn!("Failed to parse models from {}: {}", worker_url, e);
+                                    None
+                                }
+                            }
+                        } else {
+                            warn!("Worker {} returned status {}", worker_url, res.status());
+                            None
+                        }
+                    }
+                    Err(e) => {
+                        warn!("Failed to fetch models from {}: {}", worker_url, e);
+                        None
+                    }
+                }
+            })
+            .collect();
+
+        let results = futures_util::future::join_all(futures).await;
+
+        let mut all_models: Vec<serde_json::Value> = Vec::new();
+        let mut seen_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+        for result in results.into_iter().flatten() {
+            if let Some(data) = result.get("data").and_then(|d| d.as_array()) {
+                for model in data {
+                    if let Some(id) = model.get("id").and_then(|i| i.as_str()) {
+                        if seen_ids.insert(id.to_string()) {
+                            all_models.push(model.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        if all_models.is_empty() {
+            (StatusCode::SERVICE_UNAVAILABLE, "No models available from workers").into_response()
+        } else {
+            Json(serde_json::json!({
+                "object": "list",
+                "data": all_models
+            }))
+            .into_response()
+        }
+    }
+}
+
 #[async_trait]
 impl RouterTrait for Router {
     fn as_any(&self) -> &dyn std::any::Any {
@@ -1359,8 +1982,8 @@ impl RouterTrait for Router {
         self.proxy_get_request(req, "get_server_info").await
     }
 
-    async fn get_models(&self, req: Request<Body>) -> Response {
-        self.proxy_get_request(req, "v1/models").await
+    async fn get_models(&self, _req: Request<Body>) -> Response {
+        self.aggregate_models().await
     }
 
     async fn get_model_info(&self, req: Request<Body>) -> Response {
@@ -1373,7 +1996,7 @@ impl RouterTrait for Router {
         body: &GenerateRequest,
         model_id: Option<&str>,
     ) -> Response {
-        self.route_typed_request(headers, body, "/generate", model_id)
+        self.route_typed_request(headers, body, "/generate", model_id, None, None)
             .await
     }
 
@@ -1383,7 +2006,7 @@ impl RouterTrait for Router {
         body: &ChatCompletionRequest,
         model_id: Option<&str>,
     ) -> Response {
-        self.route_typed_request(headers, body, "/v1/chat/completions", model_id)
+        self.route_with_cache(headers, body, "/v1/chat/completions", model_id, body.stream)
             .await
     }
 
@@ -1393,7 +2016,7 @@ impl RouterTrait for Router {
         body: &CompletionRequest,
         model_id: Option<&str>,
     ) -> Response {
-        self.route_typed_request(headers, body, "/v1/completions", model_id)
+        self.route_with_cache(headers, body, "/v1/completions", model_id, body.stream)
             .await
     }
 
@@ -1403,7 +2026,7 @@ impl RouterTrait for Router {
         body: &ResponsesRequest,
         model_id: Option<&str>,
     ) -> Response {
-        self.route_typed_request(headers, body, "/v1/responses", model_id)
+        self.route_typed_request(headers, body, "/v1/responses", model_id, None, None)
             .await
     }
 
@@ -1426,7 +2049,7 @@ impl RouterTrait for Router {
         // Record embeddings-specific metrics in addition to general request metrics
         let start = Instant::now();
         let res = self
-            .route_typed_request(headers, body, "/v1/embeddings", model_id)
+            .route_typed_request(headers, body, "/v1/embeddings", model_id, None, None)
             .await;
 
         // Embedding specific metrics
@@ -1451,7 +2074,7 @@ impl RouterTrait for Router {
             return (StatusCode::BAD_REQUEST, e).into_response();
         }
         let response = self
-            .route_typed_request(headers, body, "/v1/rerank", model_id)
+            .route_typed_request(headers, body, "/v1/rerank", model_id, None, None)
             .await;
         if response.status().is_success() {
             match Self::build_rerank_response(body, response).await {
@@ -1637,8 +2260,8 @@ impl RouterTrait for Router {
         // Add X-data-parallel-rank header for DP-aware routing
         request_builder = dp_utils::add_dp_rank_header(request_builder, worker.dp_rank());
 
-        // Propagate headers
-        request_builder = header_utils::propagate_trace_headers(request_builder, headers);
+        // Propagate trace + Semantic Router metadata headers to the worker
+        request_builder = header_utils::propagate_all_routing_headers(request_builder, headers);
 
         // Add JSON body if not null/empty
         if !body.is_null() {
@@ -1715,6 +2338,12 @@ mod tests {
             circuit_breaker_config: CircuitBreakerConfig::default(),
             _worker_loads: Arc::new(rx),
             _load_monitor_handle: None,
+            response_cache: Arc::new(crate::cache::ResponseCache::new(128, 60)),
+            semantic_cache: None,
+            embeddings_url: None,
+            embeddings_model: "default".to_string(),
+            embedding_timeout_ms: 500,
+            semantic_cluster: None,
         }
     }
 
@@ -1787,6 +2416,12 @@ mod tests {
             circuit_breaker_config: CircuitBreakerConfig::default(),
             _worker_loads: Arc::new(rx),
             _load_monitor_handle: None,
+            response_cache: Arc::new(crate::cache::ResponseCache::new(128, 60)),
+            semantic_cache: None,
+            embeddings_url: None,
+            embeddings_model: "default".to_string(),
+            embedding_timeout_ms: 500,
+            semantic_cluster: None,
         }
     }
 
@@ -1837,7 +2472,7 @@ mod tests {
         let mut selected_urls: Vec<String> = Vec::new();
         for _ in 0..10 {
             let worker = router
-                .select_worker_for_model(None, Some(r#"{"prompt": "test"}"#), Some(&header_map))
+                .select_worker_for_model(None, Some(r#"{"prompt": "test"}"#), Some(&header_map), None)
                 .expect("Should select a worker");
             selected_urls.push(worker.url().to_string());
         }
@@ -1867,7 +2502,7 @@ mod tests {
         }
 
         let worker = router
-            .select_worker_for_model(None, Some(r#"{"prompt": "test"}"#), None)
+            .select_worker_for_model(None, Some(r#"{"prompt": "test"}"#), None, None)
             .expect("Should select the remaining healthy worker");
 
         assert_eq!(
@@ -1888,7 +2523,7 @@ mod tests {
             w.set_healthy(false);
         }
 
-        let result = router.select_worker_for_model(None, Some(r#"{"prompt": "test"}"#), None);
+        let result = router.select_worker_for_model(None, Some(r#"{"prompt": "test"}"#), None, None);
         assert!(
             result.is_none(),
             "Should return None when all workers are unavailable"
@@ -1910,6 +2545,7 @@ mod tests {
                 None,
                 Some(r#"{"prompt": "test"}"#),
                 Some(&header_map),
+                None,
             ) {
                 worker_urls_seen.insert(worker.url().to_string());
             }
@@ -1978,12 +2614,14 @@ mod tests {
     #[tokio::test]
     async fn test_wait_for_healthy_workers_partial_health() {
         // One healthy server + one unreachable URL.
-        // The new behaviour succeeds when at least one host is healthy.
+        // All hosts must be healthy, so this should time out and return Err.
         let (healthy_url, _handle) = start_healthy_mock_server().await;
         let unreachable_url = "http://127.0.0.1:1".to_string(); // port 1 is unreachable
 
-        let result = Router::wait_for_healthy_workers(&[healthy_url, unreachable_url], 5, 1).await;
-        assert!(result.is_ok());
+        // max_retries=2, interval=1s — fast timeout
+        let result =
+            Router::wait_for_healthy_workers(&[healthy_url, unreachable_url], 2, 1).await;
+        assert!(result.is_err());
     }
 
     /// Helper: start a mock server that returns 503 on /health for a given

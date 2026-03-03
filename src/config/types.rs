@@ -12,18 +12,25 @@ pub struct RouterConfig {
     #[serde(default)]
     pub connection_mode: ConnectionMode,
     /// Policy configuration
+    #[serde(default = "default_policy")]
     pub policy: PolicyConfig,
     /// Server host address
+    #[serde(default = "default_host")]
     pub host: String,
     /// Server port
+    #[serde(default = "default_port")]
     pub port: u16,
     /// Maximum payload size in bytes
+    #[serde(default = "default_max_payload_size")]
     pub max_payload_size: usize,
     /// Request timeout in seconds
+    #[serde(default = "default_request_timeout_secs")]
     pub request_timeout_secs: u64,
     /// Worker startup timeout in seconds
+    #[serde(default = "default_worker_startup_timeout_secs")]
     pub worker_startup_timeout_secs: u64,
     /// Worker health check interval in seconds
+    #[serde(default = "default_worker_startup_check_interval_secs")]
     pub worker_startup_check_interval_secs: u64,
     /// Intra-node data parallel size (number of DP replicas per worker URL). When > 1, the router will create multiple worker instances per URL, one for each DP rank.
     #[serde(default = "default_intra_node_data_parallel_size")]
@@ -44,18 +51,24 @@ pub struct RouterConfig {
     /// Custom request ID headers to check (defaults to common headers)
     pub request_id_headers: Option<Vec<String>>,
     /// Maximum concurrent requests allowed (for rate limiting)
+    #[serde(default = "default_max_concurrent_requests")]
     pub max_concurrent_requests: usize,
     /// Queue size for pending requests when max concurrent limit reached (0 = no queue, return 429 immediately)
+    #[serde(default = "default_queue_size")]
     pub queue_size: usize,
     /// Maximum time (in seconds) a request can wait in queue before timing out
+    #[serde(default = "default_queue_timeout_secs")]
     pub queue_timeout_secs: u64,
     /// Token bucket refill rate (tokens per second). If not set, defaults to max_concurrent_requests
     pub rate_limit_tokens_per_second: Option<usize>,
     /// CORS allowed origins
+    #[serde(default)]
     pub cors_allowed_origins: Vec<String>,
     /// Retry configuration
+    #[serde(default)]
     pub retry: RetryConfig,
     /// Circuit breaker configuration
+    #[serde(default)]
     pub circuit_breaker: CircuitBreakerConfig,
     /// Disable retries (overrides retry.max_retries to 1 when true)
     #[serde(default)]
@@ -64,6 +77,7 @@ pub struct RouterConfig {
     #[serde(default)]
     pub disable_circuit_breaker: bool,
     /// Health check configuration
+    #[serde(default)]
     pub health_check: HealthCheckConfig,
     /// Enable Inference Gateway mode (false = proxy mode, true = IGW mode)
     #[serde(default)]
@@ -72,6 +86,17 @@ pub struct RouterConfig {
     pub model_path: Option<String>,
     /// Explicit tokenizer path (overrides model_path tokenizer if provided)
     pub tokenizer_path: Option<String>,
+    /// Model-name → tokenizer-spec map for non-standard model names.
+    ///
+    /// Keys are substrings to match in the model name/path; values are tokenizer specs:
+    /// - A HuggingFace model ID (e.g. `meta-llama/Meta-Llama-3.1-8B`) → downloads tokenizer
+    /// - A local file path (e.g. `/path/to/tokenizer.json`) → loads from file
+    /// - `tiktoken` → use tiktoken with the same name as the key
+    /// - `tiktoken:<model>` (e.g. `tiktoken:gpt-4`) → use tiktoken with specific model
+    ///
+    /// Example: `{"llama-3": "meta-llama/Meta-Llama-3.1-8B", "codex": "tiktoken:p50k_base"}`
+    #[serde(default)]
+    pub tokenizer_model_map: HashMap<String, String>,
     /// History backend configuration (memory or none, default: memory)
     #[serde(default = "default_history_backend")]
     pub history_backend: HistoryBackend,
@@ -81,10 +106,142 @@ pub struct RouterConfig {
     /// Profiling timeout in seconds (for vLLM profiling endpoints)
     #[serde(default = "default_profile_timeout_secs")]
     pub profile_timeout_secs: u64,
+    /// Semantic similarity cache configuration (T-12).
+    /// When `None` (the default), the semantic cache is disabled.
+    #[serde(default)]
+    pub semantic_cache: Option<SemanticCacheConfig>,
+    /// Semantic cluster routing configuration.
+    /// When `None` (the default), cluster-based routing is disabled.
+    #[serde(default)]
+    pub semantic_cluster: Option<SemanticClusterConfig>,
+}
+
+fn default_policy() -> PolicyConfig {
+    PolicyConfig::Random
+}
+fn default_host() -> String {
+    "127.0.0.1".to_string()
+}
+fn default_port() -> u16 {
+    3001
+}
+fn default_max_payload_size() -> usize {
+    536_870_912 // 512 MB
+}
+fn default_request_timeout_secs() -> u64 {
+    1800 // 30 minutes
+}
+fn default_worker_startup_timeout_secs() -> u64 {
+    600
+}
+fn default_worker_startup_check_interval_secs() -> u64 {
+    30
+}
+fn default_max_concurrent_requests() -> usize {
+    32768
+}
+fn default_queue_size() -> usize {
+    100
+}
+fn default_queue_timeout_secs() -> u64 {
+    60
 }
 
 fn default_profile_timeout_secs() -> u64 {
     10
+}
+
+/// Configuration for the semantic similarity cache (T-12).
+///
+/// When `embeddings_url` is set the router will call that endpoint to obtain
+/// embedding vectors and use cosine similarity to serve cached responses for
+/// semantically equivalent requests that would otherwise miss the exact-match
+/// cache.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SemanticCacheConfig {
+    /// Base URL of the OpenAI-compatible embeddings endpoint.
+    /// Example: `"http://localhost:8010"`.
+    /// When `None` the semantic cache is disabled even if this struct is present.
+    pub embeddings_url: Option<String>,
+    /// Model name sent in embedding requests.  Defaults to `"default"`.
+    #[serde(default = "default_embeddings_model")]
+    pub embeddings_model: String,
+    /// Cosine-similarity threshold (0.0–1.0).  A cached response is returned
+    /// when its similarity to the incoming request is ≥ this value.
+    /// Default: 0.95.
+    #[serde(default = "default_semantic_threshold")]
+    pub threshold: f32,
+    /// Maximum number of embedding entries held in memory.  Default: 256.
+    #[serde(default = "default_semantic_max_entries")]
+    pub max_entries: usize,
+    /// Time-to-live for cache entries, in seconds.  Default: 300 (5 min).
+    #[serde(default = "default_semantic_ttl_secs")]
+    pub ttl_secs: u64,
+    /// Timeout in milliseconds for each embedding HTTP call.  Default: 500 ms.
+    #[serde(default = "default_embedding_timeout_ms")]
+    pub embedding_timeout_ms: u64,
+}
+
+/// Configuration for semantic cluster routing.
+///
+/// At startup the router calls the embeddings endpoint once per example in each
+/// cluster to compute centroid vectors.  Incoming requests are then routed to the
+/// cluster whose centroid is closest (cosine similarity ≥ `threshold`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SemanticClusterConfig {
+    /// Base URL of the OpenAI-compatible embeddings endpoint used to embed
+    /// cluster examples at startup and to embed incoming requests at routing
+    /// time.  Falls back to `semantic_cache.embeddings_url` when `None`.
+    pub embeddings_url: Option<String>,
+    /// Model name sent in embedding requests.  Defaults to `"default"`.
+    #[serde(default = "default_embeddings_model")]
+    pub embeddings_model: String,
+    /// Minimum cosine similarity required to commit to a cluster.
+    /// Requests below this threshold fall back to the regular policy.
+    /// Default: 0.75.
+    #[serde(default = "default_cluster_threshold")]
+    pub threshold: f32,
+    /// Timeout in milliseconds for each embedding HTTP call.  Default: 500 ms.
+    #[serde(default = "default_embedding_timeout_ms")]
+    pub embedding_timeout_ms: u64,
+    /// Cluster definitions.
+    #[serde(default)]
+    pub clusters: Vec<ClusterDefinition>,
+}
+
+/// Definition of a single semantic cluster.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClusterDefinition {
+    /// Cluster name, used in log messages and response headers.
+    pub name: String,
+    /// Example prompts that characterise this cluster.
+    /// Their embeddings are averaged at startup to form the cluster centroid.
+    #[serde(default)]
+    pub examples: Vec<String>,
+    /// Worker base URLs that belong to this cluster (must also be registered
+    /// as regular workers).
+    #[serde(default)]
+    pub workers: Vec<String>,
+}
+
+fn default_cluster_threshold() -> f32 {
+    0.75
+}
+
+fn default_embeddings_model() -> String {
+    "default".to_string()
+}
+fn default_semantic_threshold() -> f32 {
+    0.95
+}
+fn default_semantic_max_entries() -> usize {
+    256
+}
+fn default_semantic_ttl_secs() -> u64 {
+    300
+}
+fn default_embedding_timeout_ms() -> u64 {
+    500
 }
 
 fn default_history_backend() -> HistoryBackend {
@@ -441,9 +598,12 @@ impl Default for RouterConfig {
             connection_mode: ConnectionMode::Http,
             model_path: None,
             tokenizer_path: None,
+            tokenizer_model_map: HashMap::new(),
             history_backend: default_history_backend(),
             enable_profiling: false,
             profile_timeout_secs: default_profile_timeout_secs(),
+            semantic_cache: None,
+            semantic_cluster: None,
         }
     }
 }
@@ -1012,9 +1172,12 @@ mod tests {
             connection_mode: ConnectionMode::Http,
             model_path: None,
             tokenizer_path: None,
+            tokenizer_model_map: HashMap::new(),
             history_backend: default_history_backend(),
             enable_profiling: false,
             profile_timeout_secs: default_profile_timeout_secs(),
+            semantic_cache: None,
+            semantic_cluster: None,
         };
 
         assert!(config.mode.is_pd_mode());
@@ -1079,9 +1242,12 @@ mod tests {
             connection_mode: ConnectionMode::Http,
             model_path: None,
             tokenizer_path: None,
+            tokenizer_model_map: HashMap::new(),
             history_backend: default_history_backend(),
             enable_profiling: false,
             profile_timeout_secs: default_profile_timeout_secs(),
+            semantic_cache: None,
+            semantic_cluster: None,
         };
 
         assert!(!config.mode.is_pd_mode());
@@ -1142,9 +1308,12 @@ mod tests {
             connection_mode: ConnectionMode::Http,
             model_path: None,
             tokenizer_path: None,
+            tokenizer_model_map: HashMap::new(),
             history_backend: default_history_backend(),
             enable_profiling: false,
             profile_timeout_secs: default_profile_timeout_secs(),
+            semantic_cache: None,
+            semantic_cluster: None,
         };
 
         assert!(config.has_service_discovery());
