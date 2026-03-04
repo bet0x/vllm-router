@@ -206,6 +206,11 @@ struct CliArgs {
     #[arg(long)]
     admin_api_key: Option<String>,
 
+    /// Static API key for all inference endpoints. When set, clients must include
+    /// `Authorization: Bearer <key>`. Simpler alternative to api_key_validation_urls.
+    #[arg(long)]
+    inbound_api_key: Option<String>,
+
     /// Backend to route requests to (vllm, trtllm, openai, anthropic)
     #[arg(long, value_enum, default_value_t = Backend::Vllm, alias = "runtime")]
     backend: Backend,
@@ -640,6 +645,7 @@ impl CliArgs {
             worker_api_keys: std::collections::HashMap::new(),
             api_key_validation_urls,
             admin_api_key: self.admin_api_key.clone(),
+            inbound_api_key: self.inbound_api_key.clone(),
             discovery,
             metrics,
             log_dir: self.log_dir.clone(),

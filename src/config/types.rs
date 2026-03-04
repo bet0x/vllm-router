@@ -52,6 +52,10 @@ pub struct RouterConfig {
     /// When set, admin requests must include `Authorization: Bearer <admin_api_key>`.
     /// Independent of `api_key_validation_urls` (no external service needed).
     pub admin_api_key: Option<String>,
+    /// Static API key for all inference endpoints (`/v1/*`).
+    /// When set, client requests must include `Authorization: Bearer <inbound_api_key>`.
+    /// Simpler alternative to `api_key_validation_urls` (no external service needed).
+    pub inbound_api_key: Option<String>,
     /// Service discovery configuration (optional)
     pub discovery: Option<DiscoveryConfig>,
     /// Metrics configuration (optional)
@@ -712,6 +716,7 @@ impl Default for RouterConfig {
             worker_api_keys: HashMap::new(),
             api_key_validation_urls: vec![],
             admin_api_key: None,
+            inbound_api_key: None,
             discovery: None,
             metrics: None,
             log_dir: None,
@@ -1282,6 +1287,7 @@ mod tests {
             worker_api_keys: HashMap::new(),
             api_key_validation_urls: vec![],
             admin_api_key: None,
+            inbound_api_key: None,
             discovery: Some(DiscoveryConfig {
                 enabled: true,
                 namespace: Some("vllm".to_string()),
@@ -1355,6 +1361,7 @@ mod tests {
             worker_api_keys: HashMap::new(),
             api_key_validation_urls: vec![],
             admin_api_key: None,
+            inbound_api_key: None,
             discovery: Some(DiscoveryConfig {
                 enabled: true,
                 namespace: None,
@@ -1419,6 +1426,7 @@ mod tests {
             worker_api_keys: HashMap::new(),
             api_key_validation_urls: vec![],
             admin_api_key: None,
+            inbound_api_key: None,
             discovery: Some(DiscoveryConfig {
                 enabled: true,
                 namespace: Some("production".to_string()),

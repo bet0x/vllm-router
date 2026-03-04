@@ -5,6 +5,13 @@ Upstream: [vllm-project/router](https://github.com/vllm-project/router) | Fork: 
 
 ---
 
+## [0.6.0] — 2026-03-04
+
+### Added
+- **Inbound API key authentication** — new `inbound_api_key` config field (YAML or `--inbound-api-key` CLI) to protect all inference endpoints (`/v1/*`) with a static Bearer token. Simpler alternative to `api_key_validation_urls` when no external auth server is needed.
+
+---
+
 ## [0.5.1] — 2026-03-04
 
 ### Fixed

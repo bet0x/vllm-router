@@ -644,6 +644,7 @@ mod tests {
             api_key_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             api_key_validation_urls: Arc::new(Vec::new()),
             admin_api_key: None,
+            inbound_api_key: None,
             config_file_path: None,
         });
 

@@ -55,6 +55,8 @@ pub struct AppContext {
     pub api_key_validation_urls: Arc<Vec<String>>,
     /// Static API key for admin endpoints. None = admin endpoints use the same auth as everything else.
     pub admin_api_key: Option<String>,
+    /// Static API key for inference endpoints. None = no static key auth (falls through to api_key_validation_urls).
+    pub inbound_api_key: Option<String>,
     /// Path to the YAML config file (for hot reload). None when started via CLI flags.
     pub config_file_path: Option<String>,
 }
@@ -108,6 +110,7 @@ impl AppContext {
         };
 
         let admin_api_key = router_config.admin_api_key.clone();
+        let inbound_api_key = router_config.inbound_api_key.clone();
 
         Ok(Self {
             client,
@@ -121,6 +124,7 @@ impl AppContext {
             api_key_cache: Arc::new(RwLock::new(HashMap::new())),
             api_key_validation_urls: Arc::new(api_key_validation_urls),
             admin_api_key,
+            inbound_api_key,
             config_file_path,
         })
     }
@@ -819,6 +823,22 @@ async fn authorize_request(
     state: &Arc<AppState>,
     headers: &http::HeaderMap,
 ) -> Result<(), Response> {
+    // Static inbound API key check (simplest auth — no external service needed)
+    if let Some(ref expected) = state.context.inbound_api_key {
+        let token = headers
+            .get(http::header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .strip_prefix("Bearer ")
+            .map(str::trim)
+            .unwrap_or_default();
+
+        if token == expected {
+            return Ok(());
+        }
+        return Err((StatusCode::UNAUTHORIZED, AUTH_FAILURE_MESSAGE).into_response());
+    }
+
     let validation_urls = state.context.api_key_validation_urls.as_ref();
     if validation_urls.is_empty() {
         return Ok(());
