@@ -5,6 +5,25 @@ Upstream: [vllm-project/router](https://github.com/vllm-project/router) | Fork: 
 
 ---
 
+## [0.5.0] — 2026-03-03
+
+### Added
+- **Graceful worker drain** — `POST /admin/drain` marks a worker as draining (stops new requests, waits for in-flight to finish, then auto-removes); `GET /admin/drain/status` to monitor progress
+- **Hot configuration reload** — `POST /admin/reload` re-reads the YAML config and applies API key and worker list changes without restarting the router
+- **Admin API key authentication** — optional `admin_api_key` (YAML or `--admin-api-key` CLI) to protect `/admin/*` endpoints with a static Bearer token; falls back to `api_key_validation_urls` if not set
+- `GET /workers` now includes a `draining` field per worker
+- `RoutingMode::all_worker_urls()` helper for worker list diff during reload
+- `admin_api_key` example in all `configs/*.yaml` files
+- `docs/admin-api.md` — full admin API reference
+
+### Changed
+- `Router.api_key` and `Router.worker_api_keys` are now behind `Arc<RwLock<>>` for hot-swap during reload
+
+### Removed
+- `examples/` directory (legacy JSON configs from upstream SGLang, superseded by `configs/`)
+
+---
+
 ## [0.4.0] — 2026-03-03
 
 ### Added
