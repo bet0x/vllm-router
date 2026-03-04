@@ -26,6 +26,7 @@ A high-performance, lightweight request forwarding system for vLLM large-scale d
 | gRPC `SessionParams` / `ModelInfo` proto | ❌ | ✅ In `vllm_scheduler.proto` |
 | Per-routing-decision Prometheus metrics | ❌ | ✅ Worker, cluster, and fallback counters |
 | INFO-level routing logs | ❌ | ✅ Model, worker, method, status, duration |
+| Per-worker API keys | ❌ | ✅ Each backend can have its own `Authorization: Bearer` key |
 
 ---
 
@@ -76,6 +77,7 @@ Detailed guides are in the [`docs/`](docs/) folder:
 |-------|-------------|
 | [Architecture](docs/architecture.md) | When to use the router, separation of concerns with vLLM/LMCache, caching layers |
 | [Configuration](docs/configuration.md) | Full YAML reference, CLI flags, authentication, retries, circuit breakers, tokenizer mapping |
+| [Authentication](docs/authentication.md) | Inbound client validation, global and per-worker backend API keys, security best practices |
 | [Load Balancing](docs/load-balancing.md) | Policy overview, use-case recommendations, multi-turn routing, per-policy details |
 | [Semantic Routing](docs/semantic-routing.md) | Cluster routing by prompt content with embeddings |
 | [Caching](docs/caching.md) | Exact-match and semantic response cache pipeline |
