@@ -1,0 +1,130 @@
+# Authentication
+
+The router handles authentication at two levels:
+
+1. **Inbound** — validating API keys from clients calling the router
+2. **Outbound** — authorizing requests the router sends to backend workers
+
+---
+
+## Inbound: client authentication
+
+```yaml
+# Validate incoming requests against an external auth server
+api_key_validation_urls:
+  - "https://your-auth-server/validate"
+```
+
+Or via environment variable:
+
+```bash
+API_KEY_VALIDATION_URLS=https://your-auth-server/validate
+```
+
+When set, every request received by the router must carry a valid `Authorization: Bearer <key>` header. The router forwards the key to each validation URL and rejects the request if any check fails.
+
+---
+
+## Outbound: backend worker authentication
+
+The router sends `Authorization: Bearer <key>` to each backend worker. You can configure this globally or per-worker.
+
+### Global key (all workers share the same key)
+
+```yaml
+api_key: "sk-global-secret"
+```
+
+This key is added to every outbound request regardless of which worker is selected.
+
+### Per-worker keys
+
+For multi-model or multi-provider deployments where each backend has its own credentials:
+
+```yaml
+worker_api_keys:
+  "http://node1:8080": "sk-node1-secret"
+  "http://node2:8080": "sk-node2-secret"
+  # node3 has no entry → falls back to api_key global
+```
+
+The lookup key must match the worker URL exactly as declared in `worker_urls` / `prefill_urls` / `decode_urls`.
+
+### Priority order
+
+For each request the router resolves the authorization key in this order:
+
+```
+1. per-worker key from worker_api_keys  (highest priority)
+2. global api_key
+3. OPENAI_API_KEY environment variable  (PD disaggregation only, last resort)
+4. no Authorization header sent
+```
+
+### Full example — mixed credentials
+
+```yaml
+host: "0.0.0.0"
+port: 8090
+
+mode:
+  type: regular
+  worker_urls:
+    - "http://llama-node1:8080"    # uses sk-llama
+    - "http://llama-node2:8080"    # uses sk-llama
+    - "http://mistral-node:8081"   # uses sk-mistral
+    - "http://internal-node:8082"  # no entry → uses global api_key
+
+api_key: "sk-internal-fallback"
+
+worker_api_keys:
+  "http://llama-node1:8080": "sk-llama"
+  "http://llama-node2:8080": "sk-llama"
+  "http://mistral-node:8081": "sk-mistral"
+
+policy:
+  type: round_robin
+```
+
+### PD disaggregation with per-worker keys
+
+Prefill and decode workers can have different API keys:
+
+```yaml
+mode:
+  type: vllm_prefill_decode
+  prefill_urls:
+    - "http://prefill1:8081"
+    - "http://prefill2:8081"
+  decode_urls:
+    - "http://decode1:8083"
+    - "http://decode2:8083"
+
+worker_api_keys:
+  "http://prefill1:8081": "sk-prefill-cluster"
+  "http://prefill2:8081": "sk-prefill-cluster"
+  "http://decode1:8083":  "sk-decode-cluster"
+  "http://decode2:8083":  "sk-decode-cluster"
+```
+
+---
+
+## Header format
+
+All outbound authorization uses the standard HTTP Bearer token format (RFC 6750):
+
+```
+Authorization: Bearer <api_key>
+```
+
+This is the same format used by OpenAI, Anthropic, and most LLM providers.
+
+---
+
+## Security considerations
+
+- **Inbound and outbound keys are independent.** The key a client sends to the router is never forwarded to backend workers. The router uses the configured `worker_api_keys` / `api_key` instead.
+- **Minimum privilege.** Assign each worker its own key so a compromised worker credential cannot access other workers.
+- **Key rotation.** Update `worker_api_keys` and restart the router (or use service discovery with dynamic worker registration) to rotate credentials without downtime.
+- **Config file security.** Store the config file with restricted permissions (`chmod 600`) since it contains credentials in plaintext.
+- **Environment variables.** For container deployments, inject sensitive keys via Kubernetes Secrets or similar rather than baking them into config files.

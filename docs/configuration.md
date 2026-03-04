@@ -39,9 +39,22 @@ See individual files in `configs/` for per-policy documentation and inline comme
 ## Authentication
 
 ```yaml
+# Global backend key (sent to all workers)
+api_key: "sk-global-secret"
+
+# Per-worker keys (override global per worker URL)
+worker_api_keys:
+  "http://node1:8080": "sk-node1-secret"
+  "http://node2:8080": "sk-node2-secret"
+
+# Inbound client validation
 api_key_validation_urls:
   - "https://your-auth-server/validate"
 ```
+
+Priority for outbound requests: `worker_api_keys` → `api_key` → `OPENAI_API_KEY` env var.
+
+See [authentication.md](authentication.md) for the full guide including PD disaggregation, security considerations, and key rotation.
 
 Or via environment variable:
 

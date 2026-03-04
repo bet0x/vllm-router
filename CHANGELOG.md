@@ -5,6 +5,18 @@ Upstream: [vllm-project/router](https://github.com/vllm-project/router) | Fork: 
 
 ---
 
+## [Unreleased]
+
+### Added
+- **Per-worker API keys** — each backend worker can now have its own `Authorization: Bearer` key
+  - New `worker_api_keys: HashMap<String, String>` field in `RouterConfig` (url → key)
+  - Priority order: per-worker key → global `api_key` → `OPENAI_API_KEY` env var (PD mode only)
+  - Applies to all router modes: regular, PD disaggregation (prefill + decode), OpenAI proxy
+  - `VllmPDRouter`: fixed hardcoded `OPENAI_API_KEY` env var; now uses proper priority chain
+  - Documentation: `docs/authentication.md`
+
+---
+
 ## [0.3.0] — 2026-03-03
 
 ### Added

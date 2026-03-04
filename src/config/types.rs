@@ -35,8 +35,16 @@ pub struct RouterConfig {
     /// Intra-node data parallel size (number of DP replicas per worker URL). When > 1, the router will create multiple worker instances per URL, one for each DP rank.
     #[serde(default = "default_intra_node_data_parallel_size")]
     pub intra_node_data_parallel_size: usize,
-    /// The api key used for the authorization with the worker
+    /// The api key used for the authorization with the worker (global fallback for all workers)
     pub api_key: Option<String>,
+    /// Per-worker API keys: map of worker URL → api key.
+    /// When a worker URL matches a key in this map, that key is used instead of the global `api_key`.
+    /// Example:
+    ///   worker_api_keys:
+    ///     "http://node1:8080": "sk-node1-secret"
+    ///     "http://node2:8080": "sk-node2-secret"
+    #[serde(default)]
+    pub worker_api_keys: HashMap<String, String>,
     /// API key validation URLs (if set, incoming requests must validate against them)
     #[serde(default)]
     pub api_key_validation_urls: Vec<String>,
@@ -669,6 +677,7 @@ impl Default for RouterConfig {
             worker_startup_check_interval_secs: 30,
             intra_node_data_parallel_size: 1,
             api_key: None,
+            worker_api_keys: HashMap::new(),
             api_key_validation_urls: vec![],
             discovery: None,
             metrics: None,
@@ -1237,6 +1246,7 @@ mod tests {
             worker_startup_check_interval_secs: 5,
             intra_node_data_parallel_size: 1,
             api_key: None,
+            worker_api_keys: HashMap::new(),
             api_key_validation_urls: vec![],
             discovery: Some(DiscoveryConfig {
                 enabled: true,
@@ -1308,6 +1318,7 @@ mod tests {
             worker_startup_check_interval_secs: 15,
             intra_node_data_parallel_size: 1,
             api_key: None,
+            worker_api_keys: HashMap::new(),
             api_key_validation_urls: vec![],
             discovery: Some(DiscoveryConfig {
                 enabled: true,
@@ -1370,6 +1381,7 @@ mod tests {
             worker_startup_check_interval_secs: 20,
             intra_node_data_parallel_size: 1,
             api_key: None,
+            worker_api_keys: HashMap::new(),
             api_key_validation_urls: vec![],
             discovery: Some(DiscoveryConfig {
                 enabled: true,

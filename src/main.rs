@@ -632,6 +632,7 @@ impl CliArgs {
             worker_startup_check_interval_secs: self.worker_startup_check_interval,
             intra_node_data_parallel_size: self.intra_node_data_parallel_size,
             api_key: self.api_key.clone(),
+            worker_api_keys: std::collections::HashMap::new(),
             api_key_validation_urls,
             discovery,
             metrics,

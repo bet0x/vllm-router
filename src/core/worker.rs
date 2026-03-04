@@ -212,6 +212,11 @@ pub trait Worker: Send + Sync + fmt::Debug {
             .get("chat_template")
             .map(|s| s.as_str())
     }
+
+    /// Get the per-worker API key (overrides the global router api_key when set)
+    fn api_key(&self) -> Option<&str> {
+        self.metadata().api_key.as_deref()
+    }
 }
 
 /// Connection mode for worker communication
@@ -305,6 +310,8 @@ pub struct WorkerMetadata {
     pub labels: std::collections::HashMap<String, String>,
     /// Health check configuration
     pub health_config: HealthConfig,
+    /// Per-worker API key (overrides the global router api_key when set)
+    pub api_key: Option<String>,
 }
 
 /// Basic worker implementation
@@ -348,6 +355,7 @@ impl BasicWorker {
             connection_mode,
             labels: std::collections::HashMap::new(),
             health_config: HealthConfig::default(),
+            api_key: None,
         };
 
         Self {
@@ -364,6 +372,11 @@ impl BasicWorker {
 
     pub fn with_labels(mut self, labels: std::collections::HashMap<String, String>) -> Self {
         self.metadata.labels = labels;
+        self
+    }
+
+    pub fn with_api_key(mut self, api_key: Option<String>) -> Self {
+        self.metadata.api_key = api_key;
         self
     }
 

@@ -40,6 +40,8 @@ pub struct Router {
     worker_startup_check_interval_secs: u64,
     intra_node_data_parallel_size: usize,
     api_key: Option<String>,
+    /// Per-worker API keys (url → key). Populated from RouterConfig.worker_api_keys.
+    worker_api_keys: std::collections::HashMap<String, String>,
     retry_config: RetryConfig,
     circuit_breaker_config: CircuitBreakerConfig,
     _worker_loads: Arc<tokio::sync::watch::Receiver<HashMap<String, isize>>>,
@@ -106,8 +108,16 @@ impl Router {
             let model_id = Self::fetch_model_id_from_server(&ctx.client, url).await;
             let mut labels = std::collections::HashMap::new();
             labels.insert("model_id".to_string(), model_id);
+            // Strip @rank suffix (DP-aware) to look up the base URL in worker_api_keys
+            let base_url_for_lookup = url.split('@').next().unwrap_or(url);
+            let worker_api_key = ctx
+                .router_config
+                .worker_api_keys
+                .get(base_url_for_lookup)
+                .cloned();
             let worker = BasicWorker::new(url.clone(), WorkerType::Regular)
                 .with_labels(labels)
+                .with_api_key(worker_api_key)
                 .with_circuit_breaker_config(core_cb_config.clone())
                 .with_health_config(HealthConfig {
                     timeout_secs: ctx.router_config.health_check.timeout_secs,
@@ -234,6 +244,7 @@ impl Router {
                 .worker_startup_check_interval_secs,
             intra_node_data_parallel_size: ctx.router_config.intra_node_data_parallel_size,
             api_key: ctx.router_config.api_key.clone(),
+            worker_api_keys: ctx.router_config.worker_api_keys.clone(),
             retry_config: ctx.router_config.effective_retry_config(),
             circuit_breaker_config: core_cb_config,
             _worker_loads: worker_loads,
@@ -1654,9 +1665,16 @@ impl Router {
                                     Self::fetch_model_id_from_server(&client, dp_url).await;
                                 let mut labels = std::collections::HashMap::new();
                                 labels.insert("model_id".to_string(), model_id);
+                                let base_url_for_lookup =
+                                    dp_url.split('@').next().unwrap_or(dp_url);
+                                let worker_api_key = self
+                                    .worker_api_keys
+                                    .get(base_url_for_lookup)
+                                    .cloned();
                                 let new_worker =
                                     BasicWorker::new(dp_url.to_string(), WorkerType::Regular)
                                         .with_labels(labels)
+                                        .with_api_key(worker_api_key)
                                         .with_circuit_breaker_config(
                                             self.circuit_breaker_config.clone(),
                                         );
@@ -2390,8 +2408,9 @@ impl RouterTrait for Router {
             request_builder = request_builder.json(&body);
         }
 
-        // Add authorization if configured
-        if let Some(ref key) = self.api_key {
+        // Add authorization: use per-worker key if set, fall back to global api_key
+        let effective_key = worker.api_key().or(self.api_key.as_deref());
+        if let Some(key) = effective_key {
             request_builder = request_builder.header("Authorization", format!("Bearer {}", key));
         }
 
@@ -2455,6 +2474,7 @@ mod tests {
             worker_startup_check_interval_secs: 1,
             intra_node_data_parallel_size: 1,
             api_key: None,
+            worker_api_keys: std::collections::HashMap::new(),
             client: Client::new(),
             retry_config: RetryConfig::default(),
             circuit_breaker_config: CircuitBreakerConfig::default(),
@@ -2533,6 +2553,7 @@ mod tests {
             worker_startup_check_interval_secs: 1,
             intra_node_data_parallel_size: 1,
             api_key: None,
+            worker_api_keys: std::collections::HashMap::new(),
             client: Client::new(),
             retry_config: RetryConfig::default(),
             circuit_breaker_config: CircuitBreakerConfig::default(),

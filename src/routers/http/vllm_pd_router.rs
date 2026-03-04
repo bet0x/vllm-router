@@ -46,6 +46,8 @@ pub struct VllmPDRouter {
     profiling_tasks: Arc<Mutex<HashMap<String, tokio::task::AbortHandle>>>,
     /// Intra-node data parallel size for DP-aware routing (automatically enabled when > 1)
     intra_node_data_parallel_size: usize,
+    /// Global API key fallback (from RouterConfig.api_key). Used when a worker has no per-worker key.
+    api_key: Option<String>,
 }
 
 impl VllmPDRouter {
@@ -725,18 +727,20 @@ impl VllmPDRouter {
         // Start profiling on prefill server
         self.start_profiling(&prefill_base_url).await;
 
+        // Resolve auth key: per-worker key > global api_key > OPENAI_API_KEY env var
+        let prefill_auth_key = prefill_worker
+            .api_key()
+            .map(str::to_string)
+            .or_else(|| self.api_key.clone())
+            .or_else(|| std::env::var("OPENAI_API_KEY").ok())
+            .unwrap_or_default();
+
         let mut prefill_request_builder = self
             .pd_router
             .client
             .post(&prefill_url)
             .header("Content-Type", "application/json")
-            .header(
-                "Authorization",
-                format!(
-                    "Bearer {}",
-                    std::env::var("OPENAI_API_KEY").unwrap_or_default()
-                ),
-            )
+            .header("Authorization", format!("Bearer {}", prefill_auth_key))
             .header("X-Request-Id", &request_id);
 
         // Propagate trace headers and add X-data-parallel-rank header using shared utilities
@@ -865,18 +869,20 @@ impl VllmPDRouter {
         // Start profiling on decode server
         self.start_profiling(&decode_base_url).await;
 
+        // Resolve auth key: per-worker key > global api_key > OPENAI_API_KEY env var
+        let decode_auth_key = decode_worker
+            .api_key()
+            .map(str::to_string)
+            .or_else(|| self.api_key.clone())
+            .or_else(|| std::env::var("OPENAI_API_KEY").ok())
+            .unwrap_or_default();
+
         let mut decode_request_builder = self
             .pd_router
             .client
             .post(&decode_url)
             .header("Content-Type", "application/json")
-            .header(
-                "Authorization",
-                format!(
-                    "Bearer {}",
-                    std::env::var("OPENAI_API_KEY").unwrap_or_default()
-                ),
-            )
+            .header("Authorization", format!("Bearer {}", decode_auth_key))
             .header("X-Request-Id", &request_id);
 
         // Propagate trace headers and add X-data-parallel-rank header using shared utilities
@@ -1048,6 +1054,7 @@ impl VllmPDRouter {
                 profile_timeout_secs: ctx.router_config.profile_timeout_secs,
                 profiling_tasks: Arc::new(Mutex::new(HashMap::new())),
                 intra_node_data_parallel_size: ctx.router_config.intra_node_data_parallel_size,
+                api_key: ctx.router_config.api_key.clone(),
             })
         } else {
             // Direct URL mode (same as PDRouter)
@@ -1090,6 +1097,7 @@ impl VllmPDRouter {
                 profile_timeout_secs: ctx.router_config.profile_timeout_secs,
                 profiling_tasks: Arc::new(Mutex::new(HashMap::new())),
                 intra_node_data_parallel_size: ctx.router_config.intra_node_data_parallel_size,
+                api_key: ctx.router_config.api_key.clone(),
             })
         }
     }

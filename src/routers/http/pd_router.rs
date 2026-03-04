@@ -570,12 +570,19 @@ impl PDRouter {
         // Register prefill workers in the registry
         for (url, port) in expanded_prefill_urls {
             prefill_workers_urls.push(url.clone());
+            let base_url_for_lookup = url.split('@').next().unwrap_or(&url);
+            let worker_api_key = ctx
+                .router_config
+                .worker_api_keys
+                .get(base_url_for_lookup)
+                .cloned();
             let worker = BasicWorker::new(
                 url,
                 WorkerType::Prefill {
                     bootstrap_port: port,
                 },
             )
+            .with_api_key(worker_api_key)
             .with_circuit_breaker_config(core_cb_config.clone())
             .with_health_config(HealthConfig {
                 timeout_secs: ctx.router_config.health_check.timeout_secs,
@@ -590,7 +597,14 @@ impl PDRouter {
         // Register decode workers in the registry
         for url in expanded_decode_urls {
             decode_workers_urls.push(url.clone());
+            let base_url_for_lookup = url.split('@').next().unwrap_or(&url);
+            let worker_api_key = ctx
+                .router_config
+                .worker_api_keys
+                .get(base_url_for_lookup)
+                .cloned();
             let worker = BasicWorker::new(url, WorkerType::Decode)
+                .with_api_key(worker_api_key)
                 .with_circuit_breaker_config(core_cb_config.clone())
                 .with_health_config(HealthConfig {
                     timeout_secs: ctx.router_config.health_check.timeout_secs,
