@@ -121,10 +121,39 @@ This is the same format used by OpenAI, Anthropic, and most LLM providers.
 
 ---
 
+## Admin API authentication
+
+The admin endpoints (`/admin/drain`, `/admin/reload`) can be protected with a
+dedicated static API key, independent of inbound client authentication:
+
+```yaml
+admin_api_key: "my-secret-admin-key"
+```
+
+```bash
+# or via CLI
+vllm-router --admin-api-key my-secret-admin-key ...
+```
+
+When set, all `/admin/*` requests must include the key as a Bearer token:
+
+```bash
+curl -X POST http://router:3001/admin/reload \
+  -H 'Authorization: Bearer my-secret-admin-key'
+```
+
+If `admin_api_key` is **not** set, admin endpoints fall back to the same
+inbound authentication (`api_key_validation_urls`). If neither is configured,
+admin endpoints are open.
+
+See [admin-api.md](admin-api.md) for the full admin API reference.
+
+---
+
 ## Security considerations
 
 - **Inbound and outbound keys are independent.** The key a client sends to the router is never forwarded to backend workers. The router uses the configured `worker_api_keys` / `api_key` instead.
 - **Minimum privilege.** Assign each worker its own key so a compromised worker credential cannot access other workers.
-- **Key rotation.** Update `worker_api_keys` and restart the router (or use service discovery with dynamic worker registration) to rotate credentials without downtime.
+- **Key rotation.** Update `worker_api_keys` in the config file and call `POST /admin/reload` to apply without restart. See [admin-api.md](admin-api.md).
 - **Config file security.** Store the config file with restricted permissions (`chmod 600`) since it contains credentials in plaintext.
 - **Environment variables.** For container deployments, inject sensitive keys via Kubernetes Secrets or similar rather than baking them into config files.

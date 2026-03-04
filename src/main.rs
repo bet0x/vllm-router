@@ -201,6 +201,11 @@ struct CliArgs {
     #[arg(long, num_args = 0..)]
     api_key_validation_urls: Vec<String>,
 
+    /// Static API key for admin endpoints (/admin/*). When set, admin requests
+    /// must include `Authorization: Bearer <key>`. Independent of api_key_validation_urls.
+    #[arg(long)]
+    admin_api_key: Option<String>,
+
     /// Backend to route requests to (vllm, trtllm, openai, anthropic)
     #[arg(long, value_enum, default_value_t = Backend::Vllm, alias = "runtime")]
     backend: Backend,
@@ -634,6 +639,7 @@ impl CliArgs {
             api_key: self.api_key.clone(),
             worker_api_keys: std::collections::HashMap::new(),
             api_key_validation_urls,
+            admin_api_key: self.admin_api_key.clone(),
             discovery,
             metrics,
             log_dir: self.log_dir.clone(),
@@ -739,6 +745,7 @@ impl CliArgs {
             } else {
                 Some(self.request_id_headers.clone())
             },
+            config_file_path: self.config_file.clone(),
         }
     }
 }

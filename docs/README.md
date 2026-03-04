@@ -17,4 +17,5 @@ For a quick overview and getting started instructions, see the [main README](../
 | [Anthropic API](anthropic-api.md) | Anthropic Messages API support and streaming |
 | [PD Disaggregation](pd-disaggregation.md) | Prefill-Decode split inference, multi-turn with PD |
 | [Metrics](metrics.md) | Full Prometheus metrics reference |
+| [Admin API](admin-api.md) | Graceful worker drain, hot config reload, admin authentication |
 | [Kubernetes](kubernetes.md) | Kubernetes service discovery setup |

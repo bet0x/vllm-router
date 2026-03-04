@@ -1883,6 +1883,15 @@ impl WorkerManagement for PDRouter {
     fn get_worker_urls(&self) -> Vec<String> {
         self.worker_registry.get_all_urls()
     }
+
+    fn drain_worker(&self, worker_url: &str) -> Result<(), String> {
+        let worker = self
+            .worker_registry
+            .get_by_url(worker_url)
+            .ok_or_else(|| format!("Worker {} not found", worker_url))?;
+        worker.set_draining(true);
+        Ok(())
+    }
 }
 
 #[async_trait]

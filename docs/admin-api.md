@@ -1,0 +1,160 @@
+# Admin API
+
+The router exposes administrative endpoints for operational tasks like
+graceful worker drain and hot configuration reload.
+
+## Authentication
+
+Admin endpoints can be protected with a static API key. Set `admin_api_key` in
+the YAML config or pass `--admin-api-key` via CLI:
+
+```yaml
+# config.yaml
+admin_api_key: "my-secret-admin-key"
+```
+
+```bash
+# or via CLI
+vllm-router --admin-api-key my-secret-admin-key ...
+```
+
+When set, all `/admin/*` requests must include the key as a Bearer token:
+
+```bash
+curl -X POST http://router:3001/admin/reload \
+  -H 'Authorization: Bearer my-secret-admin-key'
+```
+
+Requests without the key (or with a wrong key) get `401 Unauthorized`.
+
+If `admin_api_key` is **not** set, admin endpoints fall back to the same
+authentication mechanism as other endpoints (`api_key_validation_urls`). If
+neither is configured, admin endpoints are open.
+
+## Graceful Worker Drain
+
+### `POST /admin/drain`
+
+Mark a worker as **draining**: the router immediately stops sending new requests
+to the worker while letting in-flight requests finish. Once the worker's load
+drops to zero it is automatically removed from the pool.
+
+**Request body:**
+
+```json
+{
+  "url": "http://worker1:8080",
+  "timeout_secs": 300
+}
+```
+
+| Field          | Type   | Default | Description                                      |
+|----------------|--------|---------|--------------------------------------------------|
+| `url`          | string | —       | Worker URL to drain (required)                   |
+| `timeout_secs` | u64    | 300     | Max seconds to wait before force-removing worker |
+
+**Response:** `202 Accepted`
+
+```json
+{
+  "status": "draining",
+  "url": "http://worker1:8080",
+  "timeout_secs": 300
+}
+```
+
+### `GET /admin/drain/status?url=<worker_url>`
+
+Check the drain status of a worker.
+
+**Response:** `200 OK`
+
+```json
+{
+  "url": "http://worker1:8080",
+  "draining": true,
+  "current_load": 3,
+  "healthy": true
+}
+```
+
+If the worker has already been removed (drain completed), returns `404`.
+
+## Hot Configuration Reload
+
+### `POST /admin/reload`
+
+Re-read the YAML configuration file and apply changes without restarting the
+router. Currently supports:
+
+- **API key changes** — global `api_key` and per-worker `worker_api_keys`
+- **Worker list changes** — new workers are added, removed workers are drained
+
+**Prerequisites:** The router must have been started with `--config-file`.
+CLI-only setups will return `400 Bad Request`.
+
+**Request:** No body required.
+
+**Response:** `200 OK`
+
+```json
+{
+  "status": "ok",
+  "reload": "Config reloaded: api_key, worker_api_keys updated",
+  "workers_added": ["http://new-worker:8080"],
+  "workers_drained": ["http://old-worker:8080"]
+}
+```
+
+## Worker List
+
+The `GET /workers` endpoint now includes a `draining` field for each worker:
+
+```json
+{
+  "workers": [
+    {
+      "url": "http://worker1:8080",
+      "model_id": "meta-llama/Llama-3.2-1B",
+      "is_healthy": true,
+      "draining": false,
+      "load": 5,
+      ...
+    }
+  ]
+}
+```
+
+## Typical Workflows
+
+### Rolling GPU maintenance
+
+```bash
+# 1. Drain worker before maintenance
+curl -X POST http://router:3001/admin/drain \
+  -H 'Authorization: Bearer my-secret-admin-key' \
+  -H 'Content-Type: application/json' \
+  -d '{"url": "http://gpu-node1:8080", "timeout_secs": 120}'
+
+# 2. Monitor drain progress
+curl -H 'Authorization: Bearer my-secret-admin-key' \
+  'http://router:3001/admin/drain/status?url=http://gpu-node1:8080'
+
+# 3. After maintenance, add worker back
+curl -X POST 'http://router:3001/add_worker?url=http://gpu-node1:8080'
+```
+
+### Rotating API keys
+
+```yaml
+# config.yaml — update the keys
+api_key: "sk-new-global-key"
+worker_api_keys:
+  "http://node1:8080": "sk-node1-rotated"
+```
+
+```bash
+# Apply without restart
+curl -X POST http://router:3001/admin/reload \
+  -H 'Authorization: Bearer my-secret-admin-key'
+```

@@ -78,9 +78,17 @@ pub trait Worker: Send + Sync + fmt::Debug {
     /// Get the circuit breaker for this worker
     fn circuit_breaker(&self) -> &CircuitBreaker;
 
-    /// Check if the worker is available (healthy + circuit closed/half-open)
+    /// Check if the worker is currently being drained (no new requests accepted)
+    fn is_draining(&self) -> bool {
+        false
+    }
+
+    /// Set the worker's draining status
+    fn set_draining(&self, _draining: bool) {}
+
+    /// Check if the worker is available (healthy + not draining + circuit closed/half-open)
     fn is_available(&self) -> bool {
-        self.is_healthy() && self.circuit_breaker().can_execute()
+        self.is_healthy() && !self.is_draining() && self.circuit_breaker().can_execute()
     }
 
     /// Record the outcome of a request to this worker
@@ -321,6 +329,7 @@ pub struct BasicWorker {
     load_counter: Arc<AtomicUsize>,
     processed_counter: Arc<AtomicUsize>,
     healthy: Arc<AtomicBool>,
+    draining: Arc<AtomicBool>,
     consecutive_failures: Arc<AtomicUsize>,
     consecutive_successes: Arc<AtomicUsize>,
     circuit_breaker: CircuitBreaker,
@@ -333,6 +342,7 @@ impl fmt::Debug for BasicWorker {
         f.debug_struct("BasicWorker")
             .field("metadata", &self.metadata)
             .field("healthy", &self.healthy.load(Ordering::Relaxed))
+            .field("draining", &self.draining.load(Ordering::Relaxed))
             .field("circuit_breaker", &self.circuit_breaker)
             .field("has_grpc_client", &self.grpc_client.is_some())
             .finish()
@@ -363,6 +373,7 @@ impl BasicWorker {
             load_counter: Arc::new(AtomicUsize::new(0)),
             processed_counter: Arc::new(AtomicUsize::new(0)),
             healthy: Arc::new(AtomicBool::new(true)),
+            draining: Arc::new(AtomicBool::new(false)),
             consecutive_failures: Arc::new(AtomicUsize::new(0)),
             consecutive_successes: Arc::new(AtomicUsize::new(0)),
             circuit_breaker: CircuitBreaker::new(),
@@ -439,6 +450,14 @@ impl Worker for BasicWorker {
     fn set_healthy(&self, healthy: bool) {
         self.healthy.store(healthy, Ordering::Release);
         RouterMetrics::set_worker_health(self.url(), healthy);
+    }
+
+    fn is_draining(&self) -> bool {
+        self.draining.load(Ordering::Relaxed)
+    }
+
+    fn set_draining(&self, draining: bool) {
+        self.draining.store(draining, Ordering::Relaxed);
     }
 
     async fn check_health_async(&self) -> WorkerResult<()> {
@@ -605,6 +624,14 @@ impl Worker for DPAwareWorker {
 
     fn set_healthy(&self, healthy: bool) {
         self.base_worker.set_healthy(healthy);
+    }
+
+    fn is_draining(&self) -> bool {
+        self.base_worker.is_draining()
+    }
+
+    fn set_draining(&self, draining: bool) {
+        self.base_worker.set_draining(draining);
     }
 
     async fn check_health_async(&self) -> WorkerResult<()> {

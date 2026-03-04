@@ -48,6 +48,10 @@ pub struct RouterConfig {
     /// API key validation URLs (if set, incoming requests must validate against them)
     #[serde(default)]
     pub api_key_validation_urls: Vec<String>,
+    /// Static API key for admin endpoints (`/admin/*`).
+    /// When set, admin requests must include `Authorization: Bearer <admin_api_key>`.
+    /// Independent of `api_key_validation_urls` (no external service needed).
+    pub admin_api_key: Option<String>,
     /// Service discovery configuration (optional)
     pub discovery: Option<DiscoveryConfig>,
     /// Metrics configuration (optional)
@@ -428,6 +432,34 @@ impl RoutingMode {
         matches!(self, RoutingMode::VllmPrefillDecode { .. })
     }
 
+    /// Get all worker URLs configured in this routing mode
+    pub fn all_worker_urls(&self) -> Vec<String> {
+        match self {
+            RoutingMode::Regular { worker_urls } => worker_urls.clone(),
+            RoutingMode::PrefillDecode {
+                prefill_urls,
+                decode_urls,
+                ..
+            } => {
+                let mut urls: Vec<String> =
+                    prefill_urls.iter().map(|(u, _)| u.clone()).collect();
+                urls.extend(decode_urls.clone());
+                urls
+            }
+            RoutingMode::VllmPrefillDecode {
+                prefill_urls,
+                decode_urls,
+                ..
+            } => {
+                let mut urls: Vec<String> =
+                    prefill_urls.iter().map(|(u, _)| u.clone()).collect();
+                urls.extend(decode_urls.clone());
+                urls
+            }
+            RoutingMode::OpenAI { worker_urls } => worker_urls.clone(),
+        }
+    }
+
     pub fn worker_count(&self) -> usize {
         match self {
             RoutingMode::Regular { worker_urls } => worker_urls.len(),
@@ -679,6 +711,7 @@ impl Default for RouterConfig {
             api_key: None,
             worker_api_keys: HashMap::new(),
             api_key_validation_urls: vec![],
+            admin_api_key: None,
             discovery: None,
             metrics: None,
             log_dir: None,
@@ -1248,6 +1281,7 @@ mod tests {
             api_key: None,
             worker_api_keys: HashMap::new(),
             api_key_validation_urls: vec![],
+            admin_api_key: None,
             discovery: Some(DiscoveryConfig {
                 enabled: true,
                 namespace: Some("vllm".to_string()),
@@ -1320,6 +1354,7 @@ mod tests {
             api_key: None,
             worker_api_keys: HashMap::new(),
             api_key_validation_urls: vec![],
+            admin_api_key: None,
             discovery: Some(DiscoveryConfig {
                 enabled: true,
                 namespace: None,
@@ -1383,6 +1418,7 @@ mod tests {
             api_key: None,
             worker_api_keys: HashMap::new(),
             api_key_validation_urls: vec![],
+            admin_api_key: None,
             discovery: Some(DiscoveryConfig {
                 enabled: true,
                 namespace: Some("production".to_string()),

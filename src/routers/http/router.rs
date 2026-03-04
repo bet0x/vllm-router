@@ -39,9 +39,9 @@ pub struct Router {
     worker_startup_timeout_secs: u64,
     worker_startup_check_interval_secs: u64,
     intra_node_data_parallel_size: usize,
-    api_key: Option<String>,
+    api_key: Arc<tokio::sync::RwLock<Option<String>>>,
     /// Per-worker API keys (url → key). Populated from RouterConfig.worker_api_keys.
-    worker_api_keys: std::collections::HashMap<String, String>,
+    worker_api_keys: Arc<tokio::sync::RwLock<std::collections::HashMap<String, String>>>,
     retry_config: RetryConfig,
     circuit_breaker_config: CircuitBreakerConfig,
     _worker_loads: Arc<tokio::sync::watch::Receiver<HashMap<String, isize>>>,
@@ -243,8 +243,10 @@ impl Router {
                 .router_config
                 .worker_startup_check_interval_secs,
             intra_node_data_parallel_size: ctx.router_config.intra_node_data_parallel_size,
-            api_key: ctx.router_config.api_key.clone(),
-            worker_api_keys: ctx.router_config.worker_api_keys.clone(),
+            api_key: Arc::new(tokio::sync::RwLock::new(ctx.router_config.api_key.clone())),
+            worker_api_keys: Arc::new(tokio::sync::RwLock::new(
+                ctx.router_config.worker_api_keys.clone(),
+            )),
             retry_config: ctx.router_config.effective_retry_config(),
             circuit_breaker_config: core_cb_config,
             _worker_loads: worker_loads,
@@ -262,6 +264,16 @@ impl Router {
         }
 
         Ok(router)
+    }
+
+    /// Update authentication config (hot reload)
+    pub async fn update_auth_config(
+        &self,
+        api_key: Option<String>,
+        worker_api_keys: HashMap<String, String>,
+    ) {
+        *self.api_key.write().await = api_key;
+        *self.worker_api_keys.write().await = worker_api_keys;
     }
 
     /// Build a [`SemanticClusterPolicy`] by fetching embeddings for each cluster's
@@ -1647,9 +1659,10 @@ impl Router {
                             // (e.g., "http://host:8000" → "http://host:8000@0", "@1", etc.)
                             // without querying the worker
                             let url_vec = vec![String::from(worker_url)];
+                            let api_key_guard = self.api_key.read().await;
                             let dp_url_vec = dp_utils::get_dp_aware_workers(
                                 &url_vec,
-                                &self.api_key,
+                                &api_key_guard,
                                 self.intra_node_data_parallel_size,
                             )
                             .await
@@ -1667,10 +1680,11 @@ impl Router {
                                 labels.insert("model_id".to_string(), model_id);
                                 let base_url_for_lookup =
                                     dp_url.split('@').next().unwrap_or(dp_url);
-                                let worker_api_key = self
-                                    .worker_api_keys
+                                let worker_api_keys_guard = self.worker_api_keys.read().await;
+                                let worker_api_key = worker_api_keys_guard
                                     .get(base_url_for_lookup)
                                     .cloned();
+                                drop(worker_api_keys_guard);
                                 let new_worker =
                                     BasicWorker::new(dp_url.to_string(), WorkerType::Regular)
                                         .with_labels(labels)
@@ -2021,6 +2035,24 @@ impl WorkerManagement for Router {
 
     fn get_worker_urls(&self) -> Vec<String> {
         Router::get_worker_urls(self)
+    }
+
+    fn drain_worker(&self, worker_url: &str) -> Result<(), String> {
+        let worker = self
+            .worker_registry
+            .get_by_url(worker_url)
+            .ok_or_else(|| format!("Worker {} not found", worker_url))?;
+        worker.set_draining(true);
+        Ok(())
+    }
+
+    async fn reload_config(
+        &self,
+        config: &crate::config::RouterConfig,
+    ) -> Result<String, String> {
+        self.update_auth_config(config.api_key.clone(), config.worker_api_keys.clone())
+            .await;
+        Ok("Config reloaded: api_key, worker_api_keys updated".to_string())
     }
 }
 
@@ -2409,7 +2441,8 @@ impl RouterTrait for Router {
         }
 
         // Add authorization: use per-worker key if set, fall back to global api_key
-        let effective_key = worker.api_key().or(self.api_key.as_deref());
+        let api_key_guard = self.api_key.read().await;
+        let effective_key = worker.api_key().or(api_key_guard.as_deref());
         if let Some(key) = effective_key {
             request_builder = request_builder.header("Authorization", format!("Bearer {}", key));
         }
@@ -2473,8 +2506,8 @@ mod tests {
             worker_startup_timeout_secs: 5,
             worker_startup_check_interval_secs: 1,
             intra_node_data_parallel_size: 1,
-            api_key: None,
-            worker_api_keys: std::collections::HashMap::new(),
+            api_key: Arc::new(tokio::sync::RwLock::new(None)),
+            worker_api_keys: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
             client: Client::new(),
             retry_config: RetryConfig::default(),
             circuit_breaker_config: CircuitBreakerConfig::default(),
@@ -2552,8 +2585,8 @@ mod tests {
             worker_startup_timeout_secs: 5,
             worker_startup_check_interval_secs: 1,
             intra_node_data_parallel_size: 1,
-            api_key: None,
-            worker_api_keys: std::collections::HashMap::new(),
+            api_key: Arc::new(tokio::sync::RwLock::new(None)),
+            worker_api_keys: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
             client: Client::new(),
             retry_config: RetryConfig::default(),
             circuit_breaker_config: CircuitBreakerConfig::default(),

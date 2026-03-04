@@ -23,6 +23,8 @@ policy:
   type: consistent_hash  # round_robin | random | consistent_hash | power_of_two | cache_aware
   virtual_nodes: 160     # consistent_hash only
 
+admin_api_key: "my-secret-admin-key"  # optional: protect /admin/* endpoints
+
 semantic_cluster:        # optional
   embeddings_url: "http://embeddings:8030"
   embeddings_model: "BAAI/bge-small-en-v1.5"
@@ -50,6 +52,9 @@ worker_api_keys:
 # Inbound client validation
 api_key_validation_urls:
   - "https://your-auth-server/validate"
+
+# Protect /admin/* endpoints (drain, reload) with a static key
+admin_api_key: "my-secret-admin-key"
 ```
 
 Priority for outbound requests: `worker_api_keys` → `api_key` → `OPENAI_API_KEY` env var.

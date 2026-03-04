@@ -27,6 +27,8 @@ A high-performance, lightweight request forwarding system for vLLM large-scale d
 | Per-routing-decision Prometheus metrics | ❌ | ✅ Worker, cluster, and fallback counters |
 | INFO-level routing logs | ❌ | ✅ Model, worker, method, status, duration |
 | Per-worker API keys | ❌ | ✅ Each backend can have its own `Authorization: Bearer` key |
+| Graceful worker drain | ❌ | ✅ `POST /admin/drain` — stop traffic, wait for in-flight, then remove |
+| Hot config reload | ❌ | ✅ `POST /admin/reload` — re-read YAML, swap keys & workers without restart |
 
 ---
 
@@ -84,6 +86,7 @@ Detailed guides are in the [`docs/`](docs/) folder:
 | [Anthropic API](docs/anthropic-api.md) | Anthropic Messages API support and streaming |
 | [PD Disaggregation](docs/pd-disaggregation.md) | Prefill-Decode split inference, multi-turn with PD |
 | [Metrics](docs/metrics.md) | Full Prometheus metrics reference |
+| [Admin API](docs/admin-api.md) | Graceful worker drain and hot configuration reload |
 | [Kubernetes](docs/kubernetes.md) | Kubernetes service discovery setup |
 
 ---

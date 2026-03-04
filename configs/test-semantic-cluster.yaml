@@ -44,6 +44,9 @@ port: 3000
 # Log level: trace | debug | info | warn | error
 log_level: info
 
+# Optional: protect /admin/* endpoints with a static API key.
+# admin_api_key: "my-secret-admin-key"
+
 # ---------------------------------------------------------------------------
 # Routing mode
 # ---------------------------------------------------------------------------

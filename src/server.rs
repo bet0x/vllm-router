@@ -53,6 +53,10 @@ pub struct AppContext {
     pub response_storage: SharedResponseStorage,
     pub api_key_cache: Arc<RwLock<HashMap<String, bool>>>,
     pub api_key_validation_urls: Arc<Vec<String>>,
+    /// Static API key for admin endpoints. None = admin endpoints use the same auth as everything else.
+    pub admin_api_key: Option<String>,
+    /// Path to the YAML config file (for hot reload). None when started via CLI flags.
+    pub config_file_path: Option<String>,
 }
 
 impl AppContext {
@@ -62,6 +66,7 @@ impl AppContext {
         max_concurrent_requests: usize,
         rate_limit_tokens_per_second: Option<usize>,
         api_key_validation_urls: Vec<String>,
+        config_file_path: Option<String>,
     ) -> Result<Self, String> {
         let rate_limit_tokens = rate_limit_tokens_per_second.unwrap_or(max_concurrent_requests);
         let rate_limiter = Arc::new(TokenBucket::new(max_concurrent_requests, rate_limit_tokens));
@@ -102,6 +107,8 @@ impl AppContext {
             HistoryBackend::None => Arc::new(NoOpResponseStorage::new()),
         };
 
+        let admin_api_key = router_config.admin_api_key.clone();
+
         Ok(Self {
             client,
             router_config,
@@ -113,6 +120,8 @@ impl AppContext {
             response_storage,
             api_key_cache: Arc::new(RwLock::new(HashMap::new())),
             api_key_validation_urls: Arc::new(api_key_validation_urls),
+            admin_api_key,
+            config_file_path,
         })
     }
 }
@@ -533,6 +542,269 @@ async fn v1_responses_list_input_items(
         .await
 }
 
+// ---------- Admin endpoints (drain + hot reload) ----------
+
+#[derive(Deserialize)]
+struct DrainRequest {
+    url: String,
+    #[serde(default = "default_drain_timeout")]
+    timeout_secs: u64,
+}
+
+fn default_drain_timeout() -> u64 {
+    300
+}
+
+#[derive(Deserialize)]
+struct DrainStatusQuery {
+    url: String,
+}
+
+/// Authorize an admin request.
+/// If `admin_api_key` is configured, check the Bearer token against it.
+/// Otherwise fall back to `authorize_request` (external validation URLs).
+async fn authorize_admin_request(
+    state: &Arc<AppState>,
+    headers: &http::HeaderMap,
+) -> Result<(), Response> {
+    if let Some(ref expected) = state.context.admin_api_key {
+        let token = headers
+            .get(http::header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .strip_prefix("Bearer ")
+            .map(str::trim)
+            .unwrap_or_default();
+
+        if token == expected {
+            return Ok(());
+        }
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": "Invalid or missing admin API key" })),
+        )
+            .into_response());
+    }
+
+    // No static admin key configured — fall back to the general auth mechanism
+    authorize_request(state, headers).await
+}
+
+/// POST /admin/drain — mark a worker as draining, then remove it once load hits 0
+async fn admin_drain(
+    State(state): State<Arc<AppState>>,
+    headers: http::HeaderMap,
+    Json(body): Json<DrainRequest>,
+) -> Response {
+    if let Err(response) = authorize_admin_request(&state, &headers).await {
+        return response;
+    }
+
+    let url = body.url.clone();
+    let timeout_secs = body.timeout_secs;
+
+    // Mark worker as draining
+    if let Err(e) = state.router.drain_worker(&url) {
+        return (StatusCode::NOT_FOUND, Json(json!({ "error": e }))).into_response();
+    }
+
+    info!("Draining worker {} (timeout {}s)", url, timeout_secs);
+
+    // Spawn background task to wait for load to reach 0
+    let router = state.router.clone();
+    let registry = state.context.worker_registry.clone();
+    let drain_url = url.clone();
+    tokio::spawn(async move {
+        let deadline =
+            tokio::time::Instant::now() + tokio::time::Duration::from_secs(timeout_secs);
+        loop {
+            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+            let load = registry
+                .get_by_url(&drain_url)
+                .map(|w| w.load())
+                .unwrap_or(0);
+
+            if load == 0 {
+                info!(
+                    "Worker {} drained (load=0), removing from pool",
+                    drain_url
+                );
+                router.remove_worker(&drain_url);
+                return;
+            }
+
+            if tokio::time::Instant::now() >= deadline {
+                warn!(
+                    "Drain timeout for {} (load={}), force-removing",
+                    drain_url, load
+                );
+                router.remove_worker(&drain_url);
+                return;
+            }
+        }
+    });
+
+    (
+        StatusCode::ACCEPTED,
+        Json(json!({
+            "status": "draining",
+            "url": url,
+            "timeout_secs": timeout_secs,
+        })),
+    )
+        .into_response()
+}
+
+/// GET /admin/drain/status?url=... — check drain status of a worker
+async fn admin_drain_status(
+    State(state): State<Arc<AppState>>,
+    headers: http::HeaderMap,
+    Query(query): Query<DrainStatusQuery>,
+) -> Response {
+    if let Err(response) = authorize_admin_request(&state, &headers).await {
+        return response;
+    }
+
+    match state.context.worker_registry.get_by_url(&query.url) {
+        Some(worker) => Json(json!({
+            "url": query.url,
+            "draining": worker.is_draining(),
+            "current_load": worker.load(),
+            "healthy": worker.is_healthy(),
+        }))
+        .into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": format!("Worker {} not found (may already be removed)", query.url) })),
+        )
+            .into_response(),
+    }
+}
+
+/// POST /admin/reload — re-read YAML config file and apply changes
+async fn admin_reload(
+    State(state): State<Arc<AppState>>,
+    headers: http::HeaderMap,
+) -> Response {
+    if let Err(response) = authorize_admin_request(&state, &headers).await {
+        return response;
+    }
+    let config_path = match &state.context.config_file_path {
+        Some(p) => p.clone(),
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "No config file path configured (started via CLI flags?)" })),
+            )
+                .into_response();
+        }
+    };
+
+    // Read and parse config
+    let content = match std::fs::read_to_string(&config_path) {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": format!("Failed to read config file: {}", e) })),
+            )
+                .into_response();
+        }
+    };
+
+    let new_config: RouterConfig = match serde_yaml::from_str(&content) {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": format!("Failed to parse config: {}", e) })),
+            )
+                .into_response();
+        }
+    };
+
+    // Validate
+    if let Err(e) = new_config.validate() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": format!("Config validation failed: {}", e) })),
+        )
+            .into_response();
+    }
+
+    // Apply auth config reload
+    let reload_msg = match state.router.reload_config(&new_config).await {
+        Ok(msg) => msg,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": format!("Reload failed: {}", e) })),
+            )
+                .into_response();
+        }
+    };
+
+    // Sync workers: detect new and removed workers
+    let current_urls: std::collections::HashSet<String> =
+        state.router.get_worker_urls().into_iter().collect();
+    let new_urls: std::collections::HashSet<String> =
+        new_config.mode.all_worker_urls().into_iter().collect();
+
+    let mut added = Vec::new();
+    let mut drained = Vec::new();
+
+    // Add new workers
+    for url in new_urls.difference(&current_urls) {
+        match state.router.add_worker(url).await {
+            Ok(_) => added.push(url.clone()),
+            Err(e) => warn!("Failed to add worker {} during reload: {}", url, e),
+        }
+    }
+
+    // Drain removed workers
+    for url in current_urls.difference(&new_urls) {
+        match state.router.drain_worker(url) {
+            Ok(_) => {
+                drained.push(url.clone());
+                // Spawn background removal (same as admin_drain)
+                let router = state.router.clone();
+                let registry = state.context.worker_registry.clone();
+                let drain_url = url.clone();
+                tokio::spawn(async move {
+                    let deadline = tokio::time::Instant::now()
+                        + tokio::time::Duration::from_secs(300);
+                    loop {
+                        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+                        let load = registry
+                            .get_by_url(&drain_url)
+                            .map(|w| w.load())
+                            .unwrap_or(0);
+                        if load == 0 || tokio::time::Instant::now() >= deadline {
+                            router.remove_worker(&drain_url);
+                            return;
+                        }
+                    }
+                });
+            }
+            Err(e) => warn!("Failed to drain worker {} during reload: {}", url, e),
+        }
+    }
+
+    info!(
+        "Config reloaded: {} | added: {:?} | drained: {:?}",
+        reload_msg, added, drained
+    );
+
+    Json(json!({
+        "status": "ok",
+        "reload": reload_msg,
+        "workers_added": added,
+        "workers_drained": drained,
+    }))
+    .into_response()
+}
+
 const AUTH_FAILURE_MESSAGE: &str =
     "You must provide a valid API key. Obtain one from http://helmholtz.cloud";
 
@@ -730,6 +1002,7 @@ async fn list_workers_rest(
                         WorkerType::Decode => "decode",
                     },
                     "is_healthy": worker.is_healthy(),
+                    "draining": worker.is_draining(),
                     "load": worker.load(),
                     "connection_mode": format!("{:?}", worker.connection_mode()),
                     "priority": worker.priority(),
@@ -831,6 +1104,8 @@ pub struct ServerConfig {
     pub prometheus_config: Option<PrometheusConfig>,
     pub request_timeout_secs: u64,
     pub request_id_headers: Option<Vec<String>>,
+    /// Path to the YAML config file (for hot reload)
+    pub config_file_path: Option<String>,
 }
 
 /// Build the Axum application with all routes and middleware
@@ -880,7 +1155,10 @@ pub fn build_app(
         .route("/remove_worker", post(remove_worker))
         .route("/list_workers", get(list_workers))
         .route("/flush_cache", post(flush_cache))
-        .route("/get_loads", get(get_loads));
+        .route("/get_loads", get(get_loads))
+        .route("/admin/drain", post(admin_drain))
+        .route("/admin/drain/status", get(admin_drain_status))
+        .route("/admin/reload", post(admin_reload));
 
     // Worker management routes
     let worker_routes = Router::new()
@@ -980,6 +1258,7 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
         config.router_config.max_concurrent_requests,
         config.router_config.rate_limit_tokens_per_second,
         config.router_config.api_key_validation_urls.clone(),
+        config.config_file_path.clone(),
     )?;
     println!("DEBUG: AppContext created");
 

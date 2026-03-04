@@ -609,6 +609,33 @@ impl WorkerManagement for RouterManager {
     fn get_worker_urls(&self) -> Vec<String> {
         self.worker_registry.get_all_urls()
     }
+
+    fn drain_worker(&self, worker_url: &str) -> Result<(), String> {
+        let worker = self
+            .worker_registry
+            .get_by_url(worker_url)
+            .ok_or_else(|| format!("Worker {} not found", worker_url))?;
+        worker.set_draining(true);
+        Ok(())
+    }
+
+    async fn reload_config(&self, config: &RouterConfig) -> Result<String, String> {
+        // Collect router refs first to avoid holding DashMap iter across await
+        let routers: Vec<(String, Arc<dyn crate::routers::RouterTrait>)> = self
+            .routers
+            .iter()
+            .map(|entry| (entry.key().as_str().to_string(), entry.value().clone()))
+            .collect();
+
+        let mut messages = Vec::new();
+        for (id, router) in routers {
+            match router.reload_config(config).await {
+                Ok(msg) => messages.push(format!("{}: {}", id, msg)),
+                Err(e) => messages.push(format!("{}: error: {}", id, e)),
+            }
+        }
+        Ok(messages.join("; "))
+    }
 }
 
 #[async_trait]

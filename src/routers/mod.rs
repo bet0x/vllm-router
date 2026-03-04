@@ -9,6 +9,7 @@ use axum::{
 };
 use std::fmt::Debug;
 
+use crate::config::RouterConfig;
 use crate::protocols::spec::{
     ChatCompletionRequest, CompletionRequest, EmbeddingRequest, GenerateRequest, RerankRequest,
     ResponsesRequest,
@@ -38,6 +39,19 @@ pub trait WorkerManagement: Send + Sync {
 
     /// Get all worker URLs
     fn get_worker_urls(&self) -> Vec<String>;
+
+    /// Mark a worker as draining (stop sending new requests, wait for in-flight to finish)
+    fn drain_worker(&self, worker_url: &str) -> Result<(), String> {
+        Err(format!(
+            "Drain not supported for this router type (worker: {})",
+            worker_url
+        ))
+    }
+
+    /// Reload configuration (e.g. api keys, worker list) without restart
+    async fn reload_config(&self, _config: &RouterConfig) -> Result<String, String> {
+        Ok("Reload not supported for this router type".to_string())
+    }
 }
 
 /// Core trait for all router implementations

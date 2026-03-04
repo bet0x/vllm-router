@@ -40,6 +40,9 @@ host: "0.0.0.0"
 port: 8090
 log_level: info
 
+# Optional: protect /admin/* endpoints with a static API key.
+# admin_api_key: "my-secret-admin-key"
+
 mode:
   type: pd_disaggregation
 

@@ -1740,6 +1740,10 @@ impl WorkerManagement for VllmPDRouter {
     fn get_worker_urls(&self) -> Vec<String> {
         self.pd_router.get_worker_urls()
     }
+
+    fn drain_worker(&self, worker_url: &str) -> Result<(), String> {
+        self.pd_router.drain_worker(worker_url)
+    }
 }
 
 #[cfg(test)]
