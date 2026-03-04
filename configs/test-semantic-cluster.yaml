@@ -99,6 +99,25 @@ policy:
 #   max_tree_size: 10000
 
 # ---------------------------------------------------------------------------
+# Prometheus metrics endpoint
+# ---------------------------------------------------------------------------
+# host: 0.0.0.0 makes it reachable from outside the container (needed for K8s).
+# Default: 127.0.0.1:29000
+metrics:
+  host: "0.0.0.0"
+  port: 29000
+
+# ---------------------------------------------------------------------------
+# Health checks for backend workers
+# ---------------------------------------------------------------------------
+health_check:
+  check_interval_secs: 60
+  timeout_secs: 5
+  failure_threshold: 3
+  success_threshold: 2
+  endpoint: /health
+
+# ---------------------------------------------------------------------------
 # Semantic Cluster Routing
 # ---------------------------------------------------------------------------
 # Requests are embedded and compared (cosine similarity) to pre-computed

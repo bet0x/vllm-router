@@ -26,6 +26,17 @@ policy:
 inbound_api_key: "sk-my-router-key"   # optional: protect all /v1/* inference endpoints
 admin_api_key: "my-secret-admin-key"  # optional: protect /admin/* endpoints
 
+metrics:                 # optional (default: 127.0.0.1:29000)
+  host: "0.0.0.0"
+  port: 29000
+
+health_check:            # optional
+  check_interval_secs: 60
+  timeout_secs: 5
+  failure_threshold: 3
+  success_threshold: 2
+  endpoint: /health
+
 semantic_cluster:        # optional
   embeddings_url: "http://embeddings:8030"
   embeddings_model: "BAAI/bge-small-en-v1.5"
@@ -99,11 +110,36 @@ tokenizer_model_map:
 
 Supports: `tiktoken`, `tiktoken:<model>`, local `.model` (SentencePiece), or HuggingFace model ID.
 
-## Prometheus metrics
+## Prometheus Metrics
 
 ```yaml
-prometheus_host: "0.0.0.0"
-prometheus_port: 9000       # default: 29000
+# In config file:
+metrics:
+  host: "0.0.0.0"       # default: 127.0.0.1
+  port: 29000            # default: 29000
+
+# Or via CLI flags:
+#   vllm-router --prometheus-host 0.0.0.0 --prometheus-port 29000
 ```
 
+When using `--config-file`, the `metrics` section in the YAML takes precedence over CLI flags.
+
+**Important:** For Kubernetes deployments, set `host: "0.0.0.0"` so Prometheus can scrape the pod. The default (`127.0.0.1`) only listens on localhost and is unreachable from outside the container.
+
 See [metrics.md](metrics.md) for the full metrics reference.
+
+## Health Checks
+
+```yaml
+health_check:
+  check_interval_secs: 60   # how often to check each worker (seconds)
+  timeout_secs: 5            # per-check timeout
+  failure_threshold: 3       # consecutive failures before marking unhealthy
+  success_threshold: 2       # consecutive successes to mark healthy again
+  endpoint: /health          # health check endpoint on each worker
+```
+
+Health checks run in a background loop. State changes are logged:
+- `info` when a worker goes from unhealthy → healthy
+- `warn` when a worker goes from healthy → unhealthy
+- `debug` when a worker remains unhealthy (set `RUST_LOG=debug` to see these)

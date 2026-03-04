@@ -730,10 +730,16 @@ impl CliArgs {
             None
         };
 
-        // Create Prometheus config
-        let prometheus_config = Some(PrometheusConfig {
-            port: self.prometheus_port,
-            host: self.prometheus_host.clone(),
+        // Create Prometheus config — prefer values from config file if present
+        let prometheus_config = Some(match &router_config.metrics {
+            Some(m) => PrometheusConfig {
+                port: m.port,
+                host: m.host.clone(),
+            },
+            None => PrometheusConfig {
+                port: self.prometheus_port,
+                host: self.prometheus_host.clone(),
+            },
         });
 
         ServerConfig {

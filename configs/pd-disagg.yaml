@@ -89,6 +89,19 @@ decode_policy:
   type: consistent_hash
   virtual_nodes: 160
 
+# Prometheus metrics endpoint (default: 127.0.0.1:29000)
+metrics:
+  host: "0.0.0.0"
+  port: 29000
+
+# Health checks for backend workers
+health_check:
+  check_interval_secs: 60
+  timeout_secs: 5
+  failure_threshold: 3
+  success_threshold: 2
+  endpoint: /health
+
 # Note: if your router version does not support separate prefill_policy /
 # decode_policy keys yet, use the single `policy:` key instead — it applies
 # to both pools. consistent_hash is a safe default for production:
