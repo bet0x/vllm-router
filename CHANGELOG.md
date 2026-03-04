@@ -5,7 +5,7 @@ Upstream: [vllm-project/router](https://github.com/vllm-project/router) | Fork: 
 
 ---
 
-## [Unreleased]
+## [0.4.0] — 2026-03-03
 
 ### Added
 - **Per-worker API keys** — each backend worker can now have its own `Authorization: Bearer` key
@@ -36,7 +36,7 @@ Upstream: [vllm-project/router](https://github.com/vllm-project/router) | Fork: 
 
 ---
 
-## [Unreleased] — fork additions on top of upstream main
+## [0.2.0] — fork additions
 
 ### Added
 
