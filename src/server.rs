@@ -189,40 +189,20 @@ async fn transparent_proxy_handler(State(state): State<Arc<AppState>>, req: Requ
         .await
 }
 
-// Health check endpoints
-async fn liveness(State(state): State<Arc<AppState>>, req: Request) -> Response {
-    let headers = req.headers().clone();
-    if let Err(response) = authorize_request(&state, &headers).await {
-        return response;
-    }
-
+// Health check endpoints — exempt from auth so K8s probes work
+async fn liveness(State(state): State<Arc<AppState>>, _req: Request) -> Response {
     state.router.liveness()
 }
 
-async fn readiness(State(state): State<Arc<AppState>>, req: Request) -> Response {
-    let headers = req.headers().clone();
-    if let Err(response) = authorize_request(&state, &headers).await {
-        return response;
-    }
-
+async fn readiness(State(state): State<Arc<AppState>>, _req: Request) -> Response {
     state.router.readiness()
 }
 
 async fn health(State(state): State<Arc<AppState>>, req: Request) -> Response {
-    let headers = req.headers().clone();
-    if let Err(response) = authorize_request(&state, &headers).await {
-        return response;
-    }
-
     state.router.health(req).await
 }
 
 async fn health_generate(State(state): State<Arc<AppState>>, req: Request) -> Response {
-    let headers = req.headers().clone();
-    if let Err(response) = authorize_request(&state, &headers).await {
-        return response;
-    }
-
     state.router.health_generate(req).await
 }
 

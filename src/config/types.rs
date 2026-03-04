@@ -171,6 +171,29 @@ fn default_profile_timeout_secs() -> u64 {
     10
 }
 
+// PolicyConfig defaults
+fn default_virtual_nodes() -> u32 {
+    160
+}
+fn default_load_check_interval_secs() -> u64 {
+    10
+}
+fn default_cache_threshold() -> f32 {
+    0.5
+}
+fn default_balance_abs_threshold() -> usize {
+    32
+}
+fn default_balance_rel_threshold() -> f32 {
+    1.1
+}
+fn default_eviction_interval_secs() -> u64 {
+    30
+}
+fn default_max_tree_size() -> usize {
+    10000
+}
+
 /// Configuration for the semantic similarity cache (T-12).
 ///
 /// When `embeddings_url` is set the router will call that endpoint to obtain
@@ -524,26 +547,33 @@ pub enum PolicyConfig {
     #[serde(rename = "cache_aware")]
     CacheAware {
         /// Minimum prefix match ratio to use cache-based routing
+        #[serde(default = "default_cache_threshold")]
         cache_threshold: f32,
         /// Absolute load difference threshold for load balancing
+        #[serde(default = "default_balance_abs_threshold")]
         balance_abs_threshold: usize,
         /// Relative load ratio threshold for load balancing
+        #[serde(default = "default_balance_rel_threshold")]
         balance_rel_threshold: f32,
         /// Interval between cache eviction cycles (seconds)
+        #[serde(default = "default_eviction_interval_secs")]
         eviction_interval_secs: u64,
         /// Maximum cache tree size per tenant
+        #[serde(default = "default_max_tree_size")]
         max_tree_size: usize,
     },
 
     #[serde(rename = "power_of_two")]
     PowerOfTwo {
         /// Interval for load monitoring (seconds)
+        #[serde(default = "default_load_check_interval_secs")]
         load_check_interval_secs: u64,
     },
 
     #[serde(rename = "consistent_hash")]
     ConsistentHash {
         /// Number of virtual nodes per worker for better distribution
+        #[serde(default = "default_virtual_nodes")]
         virtual_nodes: u32,
     },
 }
