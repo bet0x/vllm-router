@@ -1461,13 +1461,32 @@ impl Router {
             ) // Use json() directly with typed request
         };
 
-        // Copy all headers from original request if provided
+        // Copy all headers from original request if provided (except auth — handled below)
         if let Some(headers) = headers {
             for (name, value) in headers {
-                // Skip Content-Type and Content-Length as .json() sets them
-                if *name != CONTENT_TYPE && *name != CONTENT_LENGTH {
+                // Skip Content-Type, Content-Length (.json() sets them) and Authorization
+                // (per-worker key injected below)
+                if *name != CONTENT_TYPE
+                    && *name != CONTENT_LENGTH
+                    && *name != http::header::AUTHORIZATION
+                {
                     request_builder = request_builder.header(name, value);
                 }
+            }
+        }
+
+        // Add authorization: use per-worker key if set, fall back to global api_key
+        {
+            let base_url = worker_url.split('@').next().unwrap_or(worker_url);
+            let worker = self.worker_registry.get_by_url(base_url);
+            let api_key_guard = self.api_key.read().await;
+            let effective_key = worker
+                .as_ref()
+                .and_then(|w| w.api_key().map(|s| s.to_string()))
+                .or_else(|| api_key_guard.as_ref().cloned());
+            if let Some(key) = effective_key {
+                request_builder =
+                    request_builder.header("Authorization", format!("Bearer {}", key));
             }
         }
 

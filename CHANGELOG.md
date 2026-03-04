@@ -5,6 +5,13 @@ Upstream: [vllm-project/router](https://github.com/vllm-project/router) | Fork: 
 
 ---
 
+## [0.5.1] — 2026-03-04
+
+### Fixed
+- **Per-worker API keys not applied to typed routes** — `send_typed_request` (used by `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, `/v1/rerank`) was forwarding the client's `Authorization` header instead of injecting the per-worker key from `worker_api_keys`. Now uses the same priority as `route_simple_request`: `worker_api_keys` → `api_key` → skip.
+
+---
+
 ## [0.5.0] — 2026-03-03
 
 ### Added
