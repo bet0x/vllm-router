@@ -23,6 +23,7 @@ policy:
   type: consistent_hash  # round_robin | random | consistent_hash | power_of_two | cache_aware
   virtual_nodes: 160     # consistent_hash only
 
+inbound_api_key: "sk-my-router-key"   # optional: protect all /v1/* inference endpoints
 admin_api_key: "my-secret-admin-key"  # optional: protect /admin/* endpoints
 
 semantic_cluster:        # optional
@@ -40,6 +41,26 @@ See individual files in `configs/` for per-policy documentation and inline comme
 
 ## Authentication
 
+### Inbound (client → router)
+
+```yaml
+# Static API key for all inference endpoints (simplest option)
+inbound_api_key: "sk-my-router-key"
+
+# Or validate against an external auth server
+api_key_validation_urls:
+  - "https://your-auth-server/validate"
+
+# Protect /admin/* endpoints (drain, reload) with a separate key
+admin_api_key: "my-secret-admin-key"
+```
+
+Priority for inbound auth: `inbound_api_key` → `api_key_validation_urls` → allow all.
+
+When `inbound_api_key` is set, clients must include `Authorization: Bearer <key>` in every request. This is the simplest way to protect your router endpoint without an external auth server.
+
+### Outbound (router → backends)
+
 ```yaml
 # Global backend key (sent to all workers)
 api_key: "sk-global-secret"
@@ -48,25 +69,11 @@ api_key: "sk-global-secret"
 worker_api_keys:
   "http://node1:8080": "sk-node1-secret"
   "http://node2:8080": "sk-node2-secret"
-
-# Inbound client validation
-api_key_validation_urls:
-  - "https://your-auth-server/validate"
-
-# Protect /admin/* endpoints (drain, reload) with a static key
-admin_api_key: "my-secret-admin-key"
 ```
 
-Priority for outbound requests: `worker_api_keys` → `api_key` → `OPENAI_API_KEY` env var.
+Priority for outbound auth: `worker_api_keys` → `api_key` → `OPENAI_API_KEY` env var.
 
 See [authentication.md](authentication.md) for the full guide including PD disaggregation, security considerations, and key rotation.
-
-Or via environment variable:
-
-```bash
-# .env
-API_KEY_VALIDATION_URLS=https://your-auth-server/validate
-```
 
 ## Retries and Circuit Breakers
 
