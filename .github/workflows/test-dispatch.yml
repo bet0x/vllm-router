@@ -1,0 +1,14 @@
+name: Test Dispatch
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Test tag"
+        required: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Tag is ${{ github.event.inputs.tag }}"
