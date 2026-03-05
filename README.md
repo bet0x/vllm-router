@@ -27,6 +27,7 @@ A high-performance, lightweight request forwarding system for vLLM large-scale d
 | Per-routing-decision Prometheus metrics | ❌ | ✅ Worker, cluster, and fallback counters |
 | INFO-level routing logs | ❌ | ✅ Model, worker, method, status, duration |
 | Per-worker API keys | ❌ | ✅ Each backend can have its own `Authorization: Bearer` key |
+| Embeddings endpoint auth | ❌ | ✅ `embeddings_api_key` for semantic cache and cluster routing |
 | Graceful worker drain | ❌ | ✅ `POST /admin/drain` — stop traffic, wait for in-flight, then remove |
 | Hot config reload | ❌ | ✅ `POST /admin/reload` — re-read YAML, swap keys & workers without restart |
 

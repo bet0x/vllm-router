@@ -134,6 +134,10 @@ semantic_cluster:
   # Must match what the server actually serves (/v1/models).
   embeddings_model: "BAAI/bge-small-en-v1.5"
 
+  # Optional: Bearer token for the embeddings endpoint.
+  # Required when the embeddings server enforces API key authentication (e.g. Infinity).
+  # embeddings_api_key: "sk-embed-secret"
+
   # Minimum cosine similarity [0.0, 1.0] required to accept a cluster match.
   #   0.50 → loose matching, most requests routed to some cluster
   #   0.70 → balanced (default)

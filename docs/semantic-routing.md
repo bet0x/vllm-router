@@ -12,6 +12,7 @@ policy:
 semantic_cluster:
   embeddings_url: "http://localhost:8030"
   embeddings_model: "BAAI/bge-small-en-v1.5"
+  embeddings_api_key: "sk-embed-secret"  # optional: Bearer token for the embeddings endpoint
   threshold: 0.70
   clusters:
     - name: coding

@@ -40,6 +40,7 @@ health_check:            # optional
 semantic_cluster:        # optional
   embeddings_url: "http://embeddings:8030"
   embeddings_model: "BAAI/bge-small-en-v1.5"
+  embeddings_api_key: "sk-embed-secret"  # optional: Bearer token for embeddings endpoint
   threshold: 0.70
   embedding_timeout_ms: 2000
   clusters:
@@ -85,6 +86,24 @@ worker_api_keys:
 Priority for outbound auth: `worker_api_keys` → `api_key` → `OPENAI_API_KEY` env var.
 
 See [authentication.md](authentication.md) for the full guide including PD disaggregation, security considerations, and key rotation.
+
+### Embeddings endpoint
+
+When the embeddings server (used by semantic cache or semantic cluster routing) requires authentication, set `embeddings_api_key` in the relevant config section:
+
+```yaml
+semantic_cache:
+  embeddings_url: "http://infinity:80"
+  embeddings_model: "BAAI/bge-small-en-v1.5"
+  embeddings_api_key: "sk-embed-secret"   # sent as Authorization: Bearer
+
+semantic_cluster:
+  embeddings_url: "http://infinity:80"
+  embeddings_model: "BAAI/bge-small-en-v1.5"
+  embeddings_api_key: "sk-embed-secret"   # sent as Authorization: Bearer
+```
+
+If both `semantic_cache` and `semantic_cluster` are configured, each can have its own key (or share the same one).
 
 ## Retries and Circuit Breakers
 

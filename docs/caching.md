@@ -27,6 +27,7 @@ policy:
 semantic_cache:
   embeddings_url: "http://localhost:8030"
   embeddings_model: "BAAI/bge-small-en-v1.5"
+  embeddings_api_key: "sk-embed-secret"  # optional: Bearer token for the embeddings endpoint
   threshold: 0.95          # cosine similarity required for a cache hit
   max_entries: 256
   ttl_secs: 300

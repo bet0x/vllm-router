@@ -150,6 +150,26 @@ See [admin-api.md](admin-api.md) for the full admin API reference.
 
 ---
 
+## Embeddings endpoint authentication
+
+When using semantic cache or semantic cluster routing with an embeddings server that requires authentication (e.g. Infinity), set `embeddings_api_key` in the relevant config section:
+
+```yaml
+semantic_cache:
+  embeddings_url: "http://infinity:80"
+  embeddings_model: "BAAI/bge-small-en-v1.5"
+  embeddings_api_key: "sk-embed-secret"
+
+semantic_cluster:
+  embeddings_url: "http://infinity:80"
+  embeddings_model: "BAAI/bge-small-en-v1.5"
+  embeddings_api_key: "sk-embed-secret"
+```
+
+The key is sent as `Authorization: Bearer <embeddings_api_key>` on every request to the embeddings endpoint (both for computing cluster centroids at startup and for embedding incoming requests at runtime).
+
+---
+
 ## Security considerations
 
 - **Inbound and outbound keys are independent.** The key a client sends to the router is never forwarded to backend workers. The router uses the configured `worker_api_keys` / `api_key` instead.
