@@ -5,6 +5,14 @@ Upstream: [vllm-project/router](https://github.com/vllm-project/router) | Fork: 
 
 ---
 
+## [0.6.5] — 2026-03-05
+
+### Fixed
+- **`/v1/models` returns 503 when backends require auth** — `aggregate_models` now sends `worker_api_keys` as Bearer tokens when fetching models from workers.
+- **Worker `model_id` shows "unknown" when backends require auth** — `fetch_model_id_from_server` now receives and uses the per-worker API key.
+
+---
+
 ## [0.6.4] — 2026-03-05
 
 ### Added

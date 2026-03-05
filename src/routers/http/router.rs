@@ -107,9 +107,6 @@ impl Router {
 
         // Register workers in the registry, fetching model_id from each worker.
         for url in &worker_urls {
-            let model_id = Self::fetch_model_id_from_server(&ctx.client, url).await;
-            let mut labels = std::collections::HashMap::new();
-            labels.insert("model_id".to_string(), model_id);
             // Strip @rank suffix (DP-aware) to look up the base URL in worker_api_keys
             let base_url_for_lookup = url.split('@').next().unwrap_or(url);
             let worker_api_key = ctx
@@ -117,6 +114,11 @@ impl Router {
                 .worker_api_keys
                 .get(base_url_for_lookup)
                 .cloned();
+            let model_id =
+                Self::fetch_model_id_from_server(&ctx.client, url, worker_api_key.as_deref())
+                    .await;
+            let mut labels = std::collections::HashMap::new();
+            labels.insert("model_id".to_string(), model_id);
             let worker = BasicWorker::new(url.clone(), WorkerType::Regular)
                 .with_labels(labels)
                 .with_api_key(worker_api_key)
@@ -595,16 +597,20 @@ impl Router {
     ///   1. /get_server_info  — llm-d / SGLang-based workers
     ///   2. /v1/models        — standard vLLM (OpenAI-compatible)
     /// Returns "unknown" if both fail or neither contains a model ID.
-    async fn fetch_model_id_from_server(client: &reqwest::Client, url: &str) -> String {
+    async fn fetch_model_id_from_server(
+        client: &reqwest::Client,
+        url: &str,
+        api_key: Option<&str>,
+    ) -> String {
         let base = url.trim_end_matches('/');
 
         // 1. Try /get_server_info (llm-d / SGLang)
         let info_url = format!("{}/get_server_info", base);
-        if let Ok(resp) = client
-            .get(&info_url)
-            .timeout(Duration::from_secs(5))
-            .send()
-            .await
+        let mut req = client.get(&info_url).timeout(Duration::from_secs(5));
+        if let Some(key) = api_key {
+            req = req.bearer_auth(key);
+        }
+        if let Ok(resp) = req.send().await
         {
             if resp.status().is_success() {
                 if let Ok(json) = resp.json::<serde_json::Value>().await {
@@ -627,12 +633,11 @@ impl Router {
 
         // 2. Fall back to /v1/models (standard vLLM)
         let models_url = format!("{}/v1/models", base);
-        if let Ok(resp) = client
-            .get(&models_url)
-            .timeout(Duration::from_secs(5))
-            .send()
-            .await
-        {
+        let mut req = client.get(&models_url).timeout(Duration::from_secs(5));
+        if let Some(key) = api_key {
+            req = req.bearer_auth(key);
+        }
+        if let Ok(resp) = req.send().await {
             if resp.status().is_success() {
                 if let Ok(json) = resp.json::<serde_json::Value>().await {
                     if let Some(id) = json
@@ -1714,10 +1719,6 @@ impl Router {
                                     continue;
                                 }
                                 info!("Added worker: {}", dp_url);
-                                let model_id =
-                                    Self::fetch_model_id_from_server(&client, dp_url).await;
-                                let mut labels = std::collections::HashMap::new();
-                                labels.insert("model_id".to_string(), model_id);
                                 let base_url_for_lookup =
                                     dp_url.split('@').next().unwrap_or(dp_url);
                                 let worker_api_keys_guard = self.worker_api_keys.read().await;
@@ -1725,6 +1726,14 @@ impl Router {
                                     .get(base_url_for_lookup)
                                     .cloned();
                                 drop(worker_api_keys_guard);
+                                let model_id = Self::fetch_model_id_from_server(
+                                    &client,
+                                    dp_url,
+                                    worker_api_key.as_deref(),
+                                )
+                                .await;
+                                let mut labels = std::collections::HashMap::new();
+                                labels.insert("model_id".to_string(), model_id);
                                 let new_worker =
                                     BasicWorker::new(dp_url.to_string(), WorkerType::Regular)
                                         .with_labels(labels)
@@ -1762,8 +1771,15 @@ impl Router {
                                 return Err(format!("Worker {} already exists", worker_url));
                             }
                             info!("Added worker: {}", worker_url);
-                            let model_id =
-                                Self::fetch_model_id_from_server(&client, worker_url).await;
+                            let worker_api_keys_guard = self.worker_api_keys.read().await;
+                            let worker_api_key = worker_api_keys_guard.get(worker_url).cloned();
+                            drop(worker_api_keys_guard);
+                            let model_id = Self::fetch_model_id_from_server(
+                                &client,
+                                worker_url,
+                                worker_api_key.as_deref(),
+                            )
+                            .await;
                             let mut labels = std::collections::HashMap::new();
                             labels.insert("model_id".to_string(), model_id);
                             let new_worker =
@@ -2105,11 +2121,19 @@ impl Router {
         }
 
         let client = &self.client;
+        let worker_api_keys = self.worker_api_keys.read().await.clone();
         let futures: Vec<_> = worker_urls
             .into_iter()
-            .map(|worker_url| async move {
+            .map(|worker_url| {
+                let worker_api_keys = &worker_api_keys;
+                async move {
                 let url = format!("{}/v1/models", worker_url.trim_end_matches('/'));
-                match client.get(&url).send().await {
+                let base_url = worker_url.split('@').next().unwrap_or(&worker_url);
+                let mut req = client.get(&url);
+                if let Some(key) = worker_api_keys.get(base_url) {
+                    req = req.bearer_auth(key);
+                }
+                match req.send().await {
                     Ok(res) => {
                         if res.status().is_success() {
                             match res.json::<serde_json::Value>().await {
@@ -2129,7 +2153,7 @@ impl Router {
                         None
                     }
                 }
-            })
+            }})
             .collect();
 
         let results = futures_util::future::join_all(futures).await;
