@@ -390,7 +390,7 @@ impl WorkerRegistry {
 
                 // Reset loads periodically
                 check_count += 1;
-                if check_count.is_multiple_of(LOAD_RESET_INTERVAL) {
+                if LOAD_RESET_INTERVAL > 0 && check_count % LOAD_RESET_INTERVAL == 0 {
                     tracing::debug!("Resetting worker loads (cycle {})", check_count);
                     for worker in &workers {
                         worker.reset_load();

@@ -695,6 +695,7 @@ impl CliArgs {
             semantic_cache: self.semantic_cache_embeddings_url.as_ref().map(|url| {
                 SemanticCacheConfig {
                     embeddings_url: Some(url.clone()),
+                    embeddings_api_key: None,
                     embeddings_model: self.semantic_cache_embeddings_model.clone(),
                     threshold: self.semantic_cache_threshold,
                     max_entries: self.semantic_cache_max_entries,

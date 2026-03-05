@@ -206,6 +206,8 @@ pub struct SemanticCacheConfig {
     /// Example: `"http://localhost:8010"`.
     /// When `None` the semantic cache is disabled even if this struct is present.
     pub embeddings_url: Option<String>,
+    /// Optional API key sent as `Authorization: Bearer <key>` to the embeddings endpoint.
+    pub embeddings_api_key: Option<String>,
     /// Model name sent in embedding requests.  Defaults to `"default"`.
     #[serde(default = "default_embeddings_model")]
     pub embeddings_model: String,
@@ -236,6 +238,9 @@ pub struct SemanticClusterConfig {
     /// cluster examples at startup and to embed incoming requests at routing
     /// time.  Falls back to `semantic_cache.embeddings_url` when `None`.
     pub embeddings_url: Option<String>,
+    /// Optional API key sent as `Authorization: Bearer <key>` to the embeddings endpoint.
+    /// Falls back to `semantic_cache.embeddings_api_key` when `None`.
+    pub embeddings_api_key: Option<String>,
     /// Model name sent in embedding requests.  Defaults to `"default"`.
     #[serde(default = "default_embeddings_model")]
     pub embeddings_model: String,

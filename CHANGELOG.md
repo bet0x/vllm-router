@@ -5,6 +5,16 @@ Upstream: [vllm-project/router](https://github.com/vllm-project/router) | Fork: 
 
 ---
 
+## [0.6.3] — 2026-03-05
+
+### Added
+- **Embeddings API key authentication** — new `embeddings_api_key` field in `semantic_cache` and `semantic_cluster` config sections. When set, the router sends a `Authorization: Bearer <key>` header to the embeddings endpoint (e.g. Infinity).
+
+### Fixed
+- **Nightly-only `is_multiple_of`** — replaced unstable `unsigned_is_multiple_of` usage in `worker.rs` and `worker_registry.rs` with stable `%` operator to build on stable Rust.
+
+---
+
 ## [0.6.0] — 2026-03-04
 
 ### Added

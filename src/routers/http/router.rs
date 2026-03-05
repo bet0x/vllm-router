@@ -52,6 +52,8 @@ pub struct Router {
     semantic_cache: Option<Arc<dyn crate::cache::traits::SemanticCacheBackend>>,
     /// Base URL of the embeddings endpoint used for semantic caching/cluster routing.
     embeddings_url: Option<String>,
+    /// API key for the embeddings endpoint (sent as Bearer token).
+    embeddings_api_key: Option<String>,
     /// Model name sent in embedding requests.
     embeddings_model: String,
     /// Timeout in milliseconds for each embedding HTTP call.
@@ -213,6 +215,19 @@ impl Router {
                     .unwrap_or(500)
             });
 
+        // Resolve embeddings API key: prefer semantic_cache, fall back to semantic_cluster.
+        let embeddings_api_key = ctx
+            .router_config
+            .semantic_cache
+            .as_ref()
+            .and_then(|sc| sc.embeddings_api_key.clone())
+            .or_else(|| {
+                ctx.router_config
+                    .semantic_cluster
+                    .as_ref()
+                    .and_then(|sc| sc.embeddings_api_key.clone())
+            });
+
         // Build semantic cluster policy (computes centroids via the embeddings endpoint).
         let semantic_cluster = if let Some(sc_config) = &ctx.router_config.semantic_cluster {
             let url = sc_config
@@ -221,7 +236,7 @@ impl Router {
                 .or(embeddings_url.as_deref());
             match url {
                 Some(url) => {
-                    Self::build_semantic_clusters(sc_config, url, &ctx.client).await
+                    Self::build_semantic_clusters(sc_config, url, embeddings_api_key.as_deref(), &ctx.client).await
                 }
                 None => {
                     warn!(
@@ -254,6 +269,7 @@ impl Router {
             response_cache: Self::build_exact_cache(&ctx.router_config)?,
             semantic_cache: Self::build_semantic_cache(&ctx.router_config)?,
             embeddings_url: embeddings_url.clone(),
+            embeddings_api_key: embeddings_api_key.clone(),
             embeddings_model: embeddings_model.clone(),
             embedding_timeout_ms,
             semantic_cluster,
@@ -281,6 +297,7 @@ impl Router {
     async fn build_semantic_clusters(
         config: &crate::config::types::SemanticClusterConfig,
         embeddings_url: &str,
+        embeddings_api_key: Option<&str>,
         client: &Client,
     ) -> Option<Arc<crate::policies::SemanticClusterPolicy>> {
         use std::time::Duration;
@@ -293,15 +310,17 @@ impl Router {
             let mut embeddings: Vec<Vec<f32>> = Vec::new();
 
             for example in &cluster_def.examples {
-                let resp = client
+                let mut req = client
                     .post(&endpoint)
                     .json(&serde_json::json!({
                         "model": config.embeddings_model,
                         "input": example,
                     }))
-                    .timeout(timeout)
-                    .send()
-                    .await;
+                    .timeout(timeout);
+                if let Some(key) = embeddings_api_key {
+                    req = req.bearer_auth(key);
+                }
+                let resp = req.send().await;
 
                 let emb = match resp {
                     Ok(r) if r.status().is_success() => {
@@ -531,16 +550,18 @@ impl Router {
     async fn get_embedding(&self, text: &str) -> Option<Vec<f32>> {
         let url = self.embeddings_url.as_ref()?;
         let endpoint = format!("{}/v1/embeddings", url.trim_end_matches('/'));
-        let resp = match self
+        let mut req = self
             .client
             .post(&endpoint)
             .json(&serde_json::json!({
                 "model": self.embeddings_model,
                 "input": text,
             }))
-            .timeout(Duration::from_millis(self.embedding_timeout_ms))
-            .send()
-            .await
+            .timeout(Duration::from_millis(self.embedding_timeout_ms));
+        if let Some(ref key) = self.embeddings_api_key {
+            req = req.bearer_auth(key);
+        }
+        let resp = match req.send().await
         {
             Ok(r) => r,
             Err(e) => {
@@ -2535,6 +2556,7 @@ mod tests {
             response_cache: Arc::new(crate::cache::ResponseCache::new(128, 60)) as Arc<dyn crate::cache::traits::ExactMatchCache>,
             semantic_cache: None,
             embeddings_url: None,
+            embeddings_api_key: None,
             embeddings_model: "default".to_string(),
             embedding_timeout_ms: 500,
             semantic_cluster: None,
@@ -2614,6 +2636,7 @@ mod tests {
             response_cache: Arc::new(crate::cache::ResponseCache::new(128, 60)) as Arc<dyn crate::cache::traits::ExactMatchCache>,
             semantic_cache: None,
             embeddings_url: None,
+            embeddings_api_key: None,
             embeddings_model: "default".to_string(),
             embedding_timeout_ms: 500,
             semantic_cluster: None,
