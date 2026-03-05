@@ -80,10 +80,10 @@ Detailed guides are in the [`docs/`](docs/) folder:
 |-------|-------------|
 | [Architecture](docs/architecture.md) | When to use the router, separation of concerns with vLLM/LMCache, caching layers |
 | [Configuration](docs/configuration.md) | Full YAML reference, CLI flags, authentication, retries, circuit breakers, tokenizer mapping |
-| [Authentication](docs/authentication.md) | Inbound client validation, global and per-worker backend API keys, security best practices |
-| [Load Balancing](docs/load-balancing.md) | Policy overview, use-case recommendations, multi-turn routing, per-policy details |
-| [Semantic Routing](docs/semantic-routing.md) | Cluster routing by prompt content with embeddings |
-| [Caching](docs/caching.md) | Exact-match and semantic response cache pipeline |
+| [Authentication](docs/authentication.md) | Inbound client validation, per-worker backend API keys, embeddings endpoint auth, health probe exemptions |
+| [Load Balancing](docs/load-balancing.md) | Policy overview with defaults, use-case recommendations, multi-turn routing, per-policy details |
+| [Semantic Routing](docs/semantic-routing.md) | Cluster routing by prompt content with embeddings, API key support |
+| [Caching](docs/caching.md) | Exact-match and semantic response cache pipeline, Redis backend |
 | [Anthropic API](docs/anthropic-api.md) | Anthropic Messages API support and streaming |
 | [PD Disaggregation](docs/pd-disaggregation.md) | Prefill-Decode split inference, multi-turn with PD |
 | [Metrics](docs/metrics.md) | Full Prometheus metrics reference |
