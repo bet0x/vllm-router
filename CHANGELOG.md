@@ -5,7 +5,7 @@ Upstream: [vllm-project/router](https://github.com/vllm-project/router) | Fork: 
 
 ---
 
-## [0.6.3] — 2026-03-05
+## [0.6.4] — 2026-03-05
 
 ### Added
 - **Embeddings API key authentication** — new `embeddings_api_key` field in `semantic_cache` and `semantic_cluster` config sections. When set, the router sends a `Authorization: Bearer <key>` header to the embeddings endpoint (e.g. Infinity).
