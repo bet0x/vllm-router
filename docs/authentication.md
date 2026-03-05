@@ -23,6 +23,8 @@ API_KEY_VALIDATION_URLS=https://your-auth-server/validate
 
 When set, every request received by the router must carry a valid `Authorization: Bearer <key>` header. The router forwards the key to each validation URL and rejects the request if any check fails.
 
+**Exempt endpoints:** Health probes (`/health`, `/liveness`, `/readiness`, `/health/generate`) are always exempt from both `inbound_api_key` and `api_key_validation_urls` so that Kubernetes liveness/readiness probes work without a Bearer token.
+
 ---
 
 ## Outbound: backend worker authentication

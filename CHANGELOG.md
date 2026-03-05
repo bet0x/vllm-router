@@ -23,6 +23,21 @@ Upstream: [vllm-project/router](https://github.com/vllm-project/router) | Fork: 
 
 ---
 
+## [0.6.2] — 2026-03-04
+
+### Fixed
+- **Health endpoints exempt from `inbound_api_key`** — `/health`, `/liveness`, `/readiness`, and `/health/generate` are now exempt from inbound API key authentication, preventing Kubernetes probes from failing with 401.
+- **Serde defaults for PolicyConfig** — all policy variant fields now have `#[serde(default)]`, so configs like `policy: { type: consistent_hash }` work without specifying every field (e.g. `virtual_nodes` defaults to 160).
+
+---
+
+## [0.6.1] — 2026-03-04
+
+### Fixed
+- **Metrics config from YAML ignored** — when using `--config-file`, the `metrics` section (host/port) was ignored and CLI defaults (`127.0.0.1:29000`) were always used. Now `metrics` in YAML takes precedence, fixing Prometheus scraping in Kubernetes.
+
+---
+
 ## [0.6.0] — 2026-03-04
 
 ### Added

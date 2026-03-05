@@ -21,7 +21,7 @@ mode:
 
 policy:
   type: consistent_hash  # round_robin | random | consistent_hash | power_of_two | cache_aware
-  virtual_nodes: 160     # consistent_hash only
+  virtual_nodes: 160     # consistent_hash only (all policy fields have sensible defaults and can be omitted)
 
 inbound_api_key: "sk-my-router-key"   # optional: protect all /v1/* inference endpoints
 admin_api_key: "my-secret-admin-key"  # optional: protect /admin/* endpoints
@@ -70,6 +70,8 @@ admin_api_key: "my-secret-admin-key"
 Priority for inbound auth: `inbound_api_key` → `api_key_validation_urls` → allow all.
 
 When `inbound_api_key` is set, clients must include `Authorization: Bearer <key>` in every request. This is the simplest way to protect your router endpoint without an external auth server.
+
+**Exempt endpoints:** Health probes (`/health`, `/liveness`, `/readiness`, `/health/generate`) are always exempt from inbound authentication so that Kubernetes probes work without a Bearer token.
 
 ### Outbound (router → backends)
 

@@ -104,8 +104,10 @@ vllm-router --config-file configs/consistent-hash.yaml
 # configs/consistent-hash.yaml
 policy:
   type: consistent_hash
-  virtual_nodes: 160   # vnodes per worker (higher = better distribution)
+  virtual_nodes: 160   # vnodes per worker (default: 160, can be omitted)
 ```
+
+> **Note:** All policy fields have sensible defaults and can be omitted. For example, `policy: { type: consistent_hash }` is valid — `virtual_nodes` defaults to 160.
 
 #### Session key extraction order
 
