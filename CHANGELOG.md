@@ -5,6 +5,13 @@ Upstream: [vllm-project/router](https://github.com/vllm-project/router) | Fork: 
 
 ---
 
+## [0.6.7] — 2026-03-05
+
+### Changed
+- Version bump to trigger CI release build (no code changes from 0.6.6)
+
+---
+
 ## [0.6.6] — 2026-03-05
 
 ### Added
