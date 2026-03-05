@@ -129,7 +129,7 @@ struct CliArgs {
     worker_urls: Vec<String>,
 
     /// Load balancing policy to use
-    #[arg(long, default_value = "cache_aware", value_parser = ["random", "round_robin", "cache_aware", "power_of_two", "consistent_hash"])]
+    #[arg(long, default_value = "cache_aware", value_parser = ["random", "round_robin", "cache_aware", "power_of_two", "consistent_hash", "lmcache_aware"])]
     policy: String,
 
     /// Enable PD (Prefill-Decode) disaggregated mode
@@ -150,11 +150,11 @@ struct CliArgs {
     decode: Vec<String>,
 
     /// Specific policy for prefill nodes in PD mode
-    #[arg(long, value_parser = ["random", "round_robin", "cache_aware", "power_of_two", "consistent_hash"])]
+    #[arg(long, value_parser = ["random", "round_robin", "cache_aware", "power_of_two", "consistent_hash", "lmcache_aware"])]
     prefill_policy: Option<String>,
 
     /// Specific policy for decode nodes in PD mode
-    #[arg(long, value_parser = ["random", "round_robin", "cache_aware", "power_of_two", "consistent_hash"])]
+    #[arg(long, value_parser = ["random", "round_robin", "cache_aware", "power_of_two", "consistent_hash", "lmcache_aware"])]
     decode_policy: Option<String>,
 
     /// Timeout in seconds for worker startup
@@ -188,6 +188,26 @@ struct CliArgs {
     /// Maximum payload size in bytes
     #[arg(long, default_value_t = 536870912)] // 512MB
     max_payload_size: usize,
+
+    /// LMCache controller URL for lmcache_aware policy
+    #[arg(long, default_value = "http://localhost:9000")]
+    lmcache_controller_url: String,
+
+    /// LMCache controller poll interval in seconds
+    #[arg(long, default_value_t = 10)]
+    lmcache_poll_interval: u64,
+
+    /// LMCache cache weight (0.0 = pure load, 1.0 = pure cache affinity)
+    #[arg(long, default_value_t = 0.7)]
+    lmcache_cache_weight: f32,
+
+    /// LMCache lookup mode: "occupancy" or "prefix_lookup"
+    #[arg(long, default_value = "occupancy")]
+    lmcache_lookup_mode: String,
+
+    /// LMCache controller HTTP timeout in milliseconds
+    #[arg(long, default_value_t = 2000)]
+    lmcache_controller_timeout_ms: u64,
 
     /// Intra-node data parallel size (number of DP replicas per worker URL). When > 1, the router will create multiple worker instances per URL, one for each DP rank.
     #[arg(long, default_value_t = 1)]
@@ -445,6 +465,16 @@ impl CliArgs {
             },
             "consistent_hash" => PolicyConfig::ConsistentHash {
                 virtual_nodes: 160, // Default value
+            },
+            "lmcache_aware" => PolicyConfig::LMCacheAware {
+                controller_url: self.lmcache_controller_url.clone(),
+                poll_interval_secs: self.lmcache_poll_interval,
+                cache_weight: self.lmcache_cache_weight,
+                fallback_policy: "power_of_two".to_string(),
+                controller_timeout_ms: self.lmcache_controller_timeout_ms,
+                lookup_mode: self.lmcache_lookup_mode.clone(),
+                controller_api_key: None,
+                lmcache_worker_map: None,
             },
             _ => PolicyConfig::RoundRobin, // Fallback
         }

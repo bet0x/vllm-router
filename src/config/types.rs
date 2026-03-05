@@ -194,6 +194,26 @@ fn default_max_tree_size() -> usize {
     10000
 }
 
+// LMCacheAware defaults
+fn default_lmcache_controller_url() -> String {
+    "http://localhost:9000".to_string()
+}
+fn default_lmcache_poll_interval() -> u64 {
+    10
+}
+fn default_lmcache_cache_weight() -> f32 {
+    0.7
+}
+fn default_lmcache_fallback_policy() -> String {
+    "power_of_two".to_string()
+}
+fn default_lmcache_controller_timeout() -> u64 {
+    2000
+}
+fn default_lmcache_lookup_mode() -> String {
+    "occupancy".to_string()
+}
+
 /// Configuration for the semantic similarity cache (T-12).
 ///
 /// When `embeddings_url` is set the router will call that endpoint to obtain
@@ -581,6 +601,32 @@ pub enum PolicyConfig {
         #[serde(default = "default_virtual_nodes")]
         virtual_nodes: u32,
     },
+
+    #[serde(rename = "lmcache_aware")]
+    LMCacheAware {
+        /// URL of the LMCache controller's API server
+        #[serde(default = "default_lmcache_controller_url")]
+        controller_url: String,
+        /// How often to poll the controller for worker state (seconds)
+        #[serde(default = "default_lmcache_poll_interval")]
+        poll_interval_secs: u64,
+        /// Weight for cache occupancy vs load balancing (0.0 = pure load, 1.0 = pure cache)
+        #[serde(default = "default_lmcache_cache_weight")]
+        cache_weight: f32,
+        /// Fallback policy name when controller is unreachable
+        #[serde(default = "default_lmcache_fallback_policy")]
+        fallback_policy: String,
+        /// HTTP timeout for controller queries (milliseconds)
+        #[serde(default = "default_lmcache_controller_timeout")]
+        controller_timeout_ms: u64,
+        /// Lookup mode: "occupancy" (Phase 1) or "prefix_lookup" (Phase 2)
+        #[serde(default = "default_lmcache_lookup_mode")]
+        lookup_mode: String,
+        /// Optional: API key for the controller endpoint
+        controller_api_key: Option<String>,
+        /// Optional: explicit instance_id -> worker_url mapping
+        lmcache_worker_map: Option<HashMap<String, String>>,
+    },
 }
 
 impl PolicyConfig {
@@ -591,6 +637,7 @@ impl PolicyConfig {
             PolicyConfig::CacheAware { .. } => "cache_aware",
             PolicyConfig::PowerOfTwo { .. } => "power_of_two",
             PolicyConfig::ConsistentHash { .. } => "consistent_hash",
+            PolicyConfig::LMCacheAware { .. } => "lmcache_aware",
         }
     }
 }

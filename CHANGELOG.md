@@ -5,6 +5,16 @@ Upstream: [vllm-project/router](https://github.com/vllm-project/router) | Fork: 
 
 ---
 
+## [0.6.6] — 2026-03-05
+
+### Added
+- **`lmcache_aware` routing policy** — new policy that queries the LMCache controller for real KV cache state instead of maintaining an approximate radix tree. Routes requests to workers with the most cached data using a configurable score: `cache_weight * normalized_key_count + (1 - cache_weight) * normalized_inverse_load`. Falls back to a configurable policy (default: `power_of_two`) when the controller is unreachable.
+- **LMCache CLI flags** — `--lmcache-controller-url`, `--lmcache-poll-interval`, `--lmcache-cache-weight`, `--lmcache-lookup-mode`, `--lmcache-controller-timeout-ms` for configuring the policy via command line.
+- **Config examples** — `configs/lmcache-aware.yaml` (regular mode) and `configs/pd-lmcache-aware.yaml` (PD disaggregation with lmcache_aware prefill + consistent_hash decode).
+- **LMCache integration docs** — `docs/lmcache-integration.md` with architecture, prerequisites, configuration reference, and troubleshooting.
+
+---
+
 ## [0.6.5] — 2026-03-05
 
 ### Fixed

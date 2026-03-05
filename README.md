@@ -24,6 +24,7 @@ A high-performance, lightweight request forwarding system for vLLM large-scale d
 | `POST /v1/embeddings` (OpenAI backend) | ❌ | ✅ Proxy |
 | `POST /v1/rerank` (OpenAI backend) | ❌ | ✅ Proxy |
 | gRPC `SessionParams` / `ModelInfo` proto | ❌ | ✅ In `vllm_scheduler.proto` |
+| LMCache-aware routing (`lmcache_aware`) | ❌ | ✅ Real KV cache state from LMCache controller |
 | Per-routing-decision Prometheus metrics | ❌ | ✅ Worker, cluster, and fallback counters |
 | INFO-level routing logs | ❌ | ✅ Model, worker, method, status, duration |
 | Per-worker API keys | ❌ | ✅ Each backend can have its own `Authorization: Bearer` key |
@@ -68,6 +69,9 @@ vllm-router --config-file configs/consistent-hash.yaml
 
 # Semantic cluster routing (routes by prompt content)
 vllm-router --config-file configs/test-semantic-cluster.yaml
+
+# LMCache-aware routing (real KV cache state from controller)
+vllm-router --config-file configs/lmcache-aware.yaml
 ```
 
 ---
@@ -88,6 +92,7 @@ Detailed guides are in the [`docs/`](docs/) folder:
 | [PD Disaggregation](docs/pd-disaggregation.md) | Prefill-Decode split inference, multi-turn with PD |
 | [Metrics](docs/metrics.md) | Full Prometheus metrics reference |
 | [Admin API](docs/admin-api.md) | Graceful worker drain and hot configuration reload |
+| [LMCache Integration](docs/lmcache-integration.md) | LMCache controller-driven cache-aware routing |
 | [Kubernetes](docs/kubernetes.md) | Kubernetes service discovery setup |
 
 ---

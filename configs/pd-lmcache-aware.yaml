@@ -1,0 +1,59 @@
+# PD Disaggregation with LMCache-Aware prefill routing
+#
+# With LMCache + controller, prefill workers are no longer stateless.
+# This policy routes prefill requests to the worker that already holds
+# the conversation prefix in cache, reducing TTFT significantly.
+#
+# Recommended split:
+#   prefill_policy: lmcache_aware   - route to worker with cached prefix data
+#   decode_policy:  consistent_hash - pin session to same decode worker
+#
+# Prerequisites:
+#   - LMCache controller running (python -m lmcache.v1.api_server)
+#   - Prefill workers configured with enable_controller: true
+#   - Workers reporting cache state via ZMQ to the controller
+#
+# Start:
+#   cargo run -- --config-file configs/pd-lmcache-aware.yaml
+
+host: "0.0.0.0"
+port: 8090
+log_level: info
+
+mode:
+  type: pd_disaggregation
+  prefill_urls:
+    - "http://prefill-1:8081"
+    - "http://prefill-2:8081"
+  decode_urls:
+    - "http://decode-1:8083"
+    - "http://decode-2:8083"
+
+prefill_policy:
+  type: lmcache_aware
+  controller_url: "http://lmcache-controller:9000"
+  lookup_mode: prefix_lookup
+  poll_interval_secs: 5
+  cache_weight: 0.8
+  fallback_policy: "power_of_two"
+  controller_timeout_ms: 2000
+  lmcache_worker_map:
+    "prefill-instance-1": "http://prefill-1:8081"
+    "prefill-instance-2": "http://prefill-2:8081"
+
+decode_policy:
+  type: consistent_hash
+  virtual_nodes: 160
+
+# Prometheus metrics endpoint
+metrics:
+  host: "0.0.0.0"
+  port: 29000
+
+# Health checks for backend workers
+health_check:
+  check_interval_secs: 60
+  timeout_secs: 5
+  failure_threshold: 3
+  success_threshold: 2
+  endpoint: /health

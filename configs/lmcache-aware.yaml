@@ -1,0 +1,66 @@
+# LMCache-Aware routing
+#
+# Routes requests to the worker with the most KV cache data,
+# as reported by the LMCache controller. Eliminates the guesswork
+# of the cache_aware policy by using real cache state.
+#
+# Prerequisites:
+#   - LMCache controller running (python -m lmcache.v1.api_server)
+#   - vLLM workers configured with enable_controller: true
+#   - Workers reporting cache state via ZMQ to the controller
+#
+# Start:
+#   cargo run -- --config-file configs/lmcache-aware.yaml
+
+host: "0.0.0.0"
+port: 3000
+log_level: info
+
+mode:
+  type: regular
+  worker_urls:
+    - "http://vllm-worker-001:8000"
+    - "http://vllm-worker-002:8000"
+
+policy:
+  type: lmcache_aware
+
+  # URL of the LMCache controller's API server.
+  controller_url: "http://lmcache-controller:9000"
+
+  # How often to poll the controller for worker cache state (seconds).
+  poll_interval_secs: 10
+
+  # Balance between cache affinity and load distribution.
+  # 0.0 = pure load balancing. 1.0 = pure cache affinity.
+  cache_weight: 0.7
+
+  # Lookup mode:
+  #   "occupancy"      - Phase 1: route by total key_count per worker (polling)
+  #   "prefix_lookup"  - Phase 2: per-request POST /lookup for prefix matching
+  lookup_mode: occupancy
+
+  # Policy when LMCache controller is unreachable.
+  fallback_policy: "power_of_two"
+
+  # HTTP timeout for controller API calls (milliseconds).
+  controller_timeout_ms: 2000
+
+  # Mapping: LMCache instance_id -> router worker URL.
+  # Must match lmcache_instance_id on each worker's LMCache config.
+  lmcache_worker_map:
+    "vllm-001": "http://vllm-worker-001:8000"
+    "vllm-002": "http://vllm-worker-002:8000"
+
+# Prometheus metrics endpoint
+metrics:
+  host: "0.0.0.0"
+  port: 29000
+
+# Health checks for backend workers
+health_check:
+  check_interval_secs: 60
+  timeout_secs: 5
+  failure_threshold: 3
+  success_threshold: 2
+  endpoint: /health

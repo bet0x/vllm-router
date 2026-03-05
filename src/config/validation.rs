@@ -239,6 +239,34 @@ impl ConfigValidator {
                     });
                 }
             }
+            PolicyConfig::LMCacheAware {
+                cache_weight,
+                poll_interval_secs,
+                controller_url,
+                ..
+            } => {
+                if !(0.0..=1.0).contains(cache_weight) {
+                    return Err(ConfigError::InvalidValue {
+                        field: "cache_weight".to_string(),
+                        value: cache_weight.to_string(),
+                        reason: "Must be between 0.0 and 1.0".to_string(),
+                    });
+                }
+                if *poll_interval_secs == 0 {
+                    return Err(ConfigError::InvalidValue {
+                        field: "poll_interval_secs".to_string(),
+                        value: poll_interval_secs.to_string(),
+                        reason: "Must be > 0".to_string(),
+                    });
+                }
+                if controller_url.is_empty() {
+                    return Err(ConfigError::InvalidValue {
+                        field: "controller_url".to_string(),
+                        value: controller_url.to_string(),
+                        reason: "Must not be empty".to_string(),
+                    });
+                }
+            }
         }
         Ok(())
     }

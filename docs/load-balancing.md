@@ -11,6 +11,7 @@ The vLLM Router supports multiple load balancing policies for distributing reque
 | `consistent_hash` | Same session → same worker | Yes | `configs/consistent-hash.yaml` |
 | `power_of_two` | Least loaded of 2 random workers | No | `configs/power-of-two.yaml` |
 | `cache_aware` | Worker with most cached prompt prefix | Yes | `configs/cache-aware.yaml` |
+| `lmcache_aware` | Worker with most real KV cache data (via LMCache controller) | Yes | `configs/lmcache-aware.yaml` |
 
 ---
 
@@ -23,6 +24,8 @@ The vLLM Router supports multiple load balancing policies for distributing reque
 | Multi-turn chat with PD disaggregation | `decode_policy: consistent_hash` + `prefill_policy: power_of_two` | KV cache accumulates on the decode worker, not the prefill worker. Pin the decode pool by session; let the prefill pool balance freely. See `configs/pd-disagg.yaml`. |
 | Batch inference / one-shot completions | `power_of_two` | No session state needed; picks the least loaded of two random workers, avoiding hot-spots under variable request durations. |
 | Repeated prompts / few-shot templates | `cache_aware` | Maximises KV cache reuse when many requests share a long common prefix (system prompt, few-shot examples). |
+| Multi-turn with LMCache controller | `lmcache_aware` | Routes to the worker with the most real KV cache data, as reported by the LMCache controller. Eliminates heuristic guesswork. Requires LMCache controller deployment. See [LMCache Integration](lmcache-integration.md). |
+| PD disaggregation with LMCache | `prefill: lmcache_aware` + `decode: consistent_hash` | Prefill workers are no longer stateless when LMCache tracks cache state. Route prefill to the worker that already has the prefix cached. See `configs/pd-lmcache-aware.yaml`. |
 | Simple scaling, homogeneous workers | `round_robin` | Predictable, zero overhead, works well when all workers are equivalent and request durations are similar. |
 | Routing by prompt content (topics / domains) | `consistent_hash` + semantic clusters | Requests are embedded and matched to the nearest cluster centroid; workers within that cluster are then chosen by consistent hash for KV cache affinity. See `configs/test-semantic-cluster.yaml`. |
 | Multi-tenant API (per-customer isolation) | `consistent_hash` | `x-user-id` or `x-tenant-id` header pins each tenant to a dedicated worker, preventing cross-tenant cache pollution. |
@@ -195,6 +198,45 @@ policy:
 
 Best for workloads with repeated prompt prefixes (system prompts, few-shot examples) and multi-tenant deployments with distinct prompt patterns.
 
+### LMCache Aware
+
+Routes requests based on **real KV cache state** reported by the LMCache controller, rather than heuristic prefix trees. Requires an LMCache controller deployment.
+
+```bash
+vllm-router --config-file configs/lmcache-aware.yaml
+```
+
+```yaml
+# configs/lmcache-aware.yaml
+policy:
+  type: lmcache_aware
+  controller_url: "http://lmcache-controller:9000"
+  poll_interval_secs: 10
+  cache_weight: 0.7
+  fallback_policy: "power_of_two"
+  controller_timeout_ms: 2000
+  lookup_mode: occupancy
+  lmcache_worker_map:
+    "vllm-001": "http://vllm-worker-001:8000"
+    "vllm-002": "http://vllm-worker-002:8000"
+```
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `controller_url` | `http://localhost:9000` | LMCache controller API server URL |
+| `poll_interval_secs` | `10` | Polling interval for worker cache state |
+| `cache_weight` | `0.7` | Cache vs load weight (0.0 = pure load, 1.0 = pure cache) |
+| `fallback_policy` | `power_of_two` | Policy when controller is unreachable |
+| `controller_timeout_ms` | `2000` | HTTP timeout for controller calls |
+| `lookup_mode` | `occupancy` | `occupancy` or `prefix_lookup` |
+| `lmcache_worker_map` | — | Maps LMCache `instance_id` to router worker URL |
+
+**Scoring:** `score = cache_weight * normalized_key_count + (1 - cache_weight) * normalized_inverse_load`. The worker with the highest score is selected.
+
+**Fallback:** When the controller is unreachable, the policy transparently degrades to the configured `fallback_policy`. No errors are returned to clients.
+
+Best for multi-turn workloads with LMCache enabled, where real cache state data produces better routing decisions than heuristic prefix trees. See [LMCache Integration](lmcache-integration.md) for full setup instructions.
+
 ---
 
 ## Choosing a Policy
@@ -234,4 +276,6 @@ Best for workloads with repeated prompt prefixes (system prompts, few-shot examp
 | Batch inference with no state | `round_robin` |
 | Variable request complexity | `power_of_two` |
 | Repeated system prompts / few-shot | `cache_aware` |
+| LMCache controller deployed, multi-turn | `lmcache_aware` |
+| PD disaggregation with LMCache | prefill: `lmcache_aware`, decode: `consistent_hash` |
 | Simple testing / development | `random` |

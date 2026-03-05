@@ -1,8 +1,8 @@
 //! Factory for creating load balancing policies
 
 use super::{
-    CacheAwareConfig, CacheAwarePolicy, ConsistentHashPolicy, LoadBalancingPolicy,
-    PowerOfTwoPolicy, RandomPolicy, RoundRobinPolicy,
+    CacheAwareConfig, CacheAwarePolicy, ConsistentHashPolicy, LMCacheAwareConfig,
+    LMCacheAwarePolicy, LoadBalancingPolicy, PowerOfTwoPolicy, RandomPolicy, RoundRobinPolicy,
 };
 use crate::config::PolicyConfig;
 use std::sync::Arc;
@@ -38,6 +38,30 @@ impl PolicyFactory {
                 // The consistent hash policy uses a hardcoded value for now
                 Arc::new(ConsistentHashPolicy::new())
             }
+            PolicyConfig::LMCacheAware {
+                controller_url,
+                poll_interval_secs,
+                cache_weight,
+                fallback_policy,
+                controller_timeout_ms,
+                lookup_mode,
+                controller_api_key,
+                lmcache_worker_map,
+            } => {
+                let fallback = PolicyFactory::create_by_name(fallback_policy)
+                    .unwrap_or_else(|| Arc::new(PowerOfTwoPolicy::new()));
+                let config = LMCacheAwareConfig {
+                    controller_url: controller_url.clone(),
+                    poll_interval_secs: *poll_interval_secs,
+                    cache_weight: *cache_weight,
+                    fallback_policy_name: fallback_policy.clone(),
+                    controller_timeout_ms: *controller_timeout_ms,
+                    lookup_mode: lookup_mode.clone(),
+                    controller_api_key: controller_api_key.clone(),
+                    lmcache_worker_map: lmcache_worker_map.clone(),
+                };
+                Arc::new(LMCacheAwarePolicy::new(config, fallback))
+            }
         }
     }
 
@@ -49,6 +73,9 @@ impl PolicyFactory {
             "power_of_two" | "poweroftwo" => Some(Arc::new(PowerOfTwoPolicy::new())),
             "cache_aware" | "cacheaware" => Some(Arc::new(CacheAwarePolicy::new())),
             "consistent_hash" | "consistenthash" => Some(Arc::new(ConsistentHashPolicy::new())),
+            "lmcache_aware" | "lmcacheaware" => {
+                Some(Arc::new(LMCacheAwarePolicy::with_defaults()))
+            }
             _ => None,
         }
     }

@@ -18,4 +18,5 @@ For a quick overview and getting started instructions, see the [main README](../
 | [PD Disaggregation](pd-disaggregation.md) | Prefill-Decode split inference, multi-turn with PD |
 | [Metrics](metrics.md) | Full Prometheus metrics reference |
 | [Admin API](admin-api.md) | Graceful worker drain, hot config reload, admin authentication |
+| [LMCache Integration](lmcache-integration.md) | LMCache controller-driven cache-aware routing (`lmcache_aware` policy) |
 | [Kubernetes](kubernetes.md) | Kubernetes service discovery setup |
