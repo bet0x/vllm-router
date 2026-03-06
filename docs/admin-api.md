@@ -18,12 +18,31 @@ admin_api_key: "my-secret-admin-key"
 vllm-router --admin-api-key my-secret-admin-key ...
 ```
 
-When set, all `/admin/*` requests must include the key as a Bearer token:
+When set, all `/admin/*` requests must include the key as a Bearer token or
+via the `X-Admin-Key` header:
 
 ```bash
+# Standard Bearer token
 curl -X POST http://router:3001/admin/reload \
   -H 'Authorization: Bearer my-secret-admin-key'
+
+# Alternative header (useful behind k8s service proxy)
+curl -X POST http://router:3001/admin/reload \
+  -H 'X-Admin-Key: my-secret-admin-key'
 ```
+
+Similarly, the `inbound_api_key` for inference endpoints (`/v1/*`, `/workers`,
+`/add_worker`) accepts both `Authorization: Bearer <key>` and `X-Router-Key`:
+
+```bash
+curl http://router:3001/workers \
+  -H 'X-Router-Key: my-inbound-key'
+```
+
+> **Why alternative headers?** When the router sits behind a Kubernetes service
+> proxy, the API server consumes the `Authorization` header for its own auth and
+> does not forward it to the backend service. Custom headers like `X-Router-Key`
+> and `X-Admin-Key` pass through unmodified.
 
 Requests without the key (or with a wrong key) get `401 Unauthorized`.
 

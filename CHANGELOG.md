@@ -5,6 +5,13 @@ Upstream: [vllm-project/router](https://github.com/vllm-project/router) | Fork: 
 
 ---
 
+## [0.6.9] — 2026-03-06
+
+### Added
+- **Alternative auth headers for k8s proxy** — `X-Router-Key` header accepted as fallback for `inbound_api_key` auth, and `X-Admin-Key` for admin endpoints. Allows authentication when the router is accessed through the Kubernetes service proxy, which strips the `Authorization` header.
+
+---
+
 ## [0.6.8] — 2026-03-06
 
 ### Changed

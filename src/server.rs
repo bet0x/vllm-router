@@ -551,16 +551,16 @@ async fn authorize_admin_request(
     state: &Arc<AppState>,
     headers: &http::HeaderMap,
 ) -> Result<(), Response> {
+    // Accepts: Authorization: Bearer <key> OR X-Admin-Key: <key> (for k8s proxy)
     if let Some(ref expected) = state.context.admin_api_key {
         let token = headers
             .get(http::header::AUTHORIZATION)
             .and_then(|v| v.to_str().ok())
-            .unwrap_or_default()
-            .strip_prefix("Bearer ")
+            .and_then(|s| s.strip_prefix("Bearer "))
             .map(str::trim)
-            .unwrap_or_default();
+            .or_else(|| headers.get("X-Admin-Key").and_then(|v| v.to_str().ok()).map(str::trim));
 
-        if token == expected {
+        if token == Some(expected.as_str()) {
             return Ok(());
         }
         return Err((
@@ -804,16 +804,16 @@ async fn authorize_request(
     headers: &http::HeaderMap,
 ) -> Result<(), Response> {
     // Static inbound API key check (simplest auth — no external service needed)
+    // Accepts: Authorization: Bearer <key> OR X-Router-Key: <key> (for k8s proxy)
     if let Some(ref expected) = state.context.inbound_api_key {
         let token = headers
             .get(http::header::AUTHORIZATION)
             .and_then(|v| v.to_str().ok())
-            .unwrap_or_default()
-            .strip_prefix("Bearer ")
+            .and_then(|s| s.strip_prefix("Bearer "))
             .map(str::trim)
-            .unwrap_or_default();
+            .or_else(|| headers.get("X-Router-Key").and_then(|v| v.to_str().ok()).map(str::trim));
 
-        if token == expected {
+        if token == Some(expected.as_str()) {
             return Ok(());
         }
         return Err((StatusCode::UNAUTHORIZED, AUTH_FAILURE_MESSAGE).into_response());
