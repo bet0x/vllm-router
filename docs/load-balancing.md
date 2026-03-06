@@ -228,7 +228,7 @@ policy:
 | `cache_weight` | `0.7` | Cache vs load weight (0.0 = pure load, 1.0 = pure cache) |
 | `fallback_policy` | `power_of_two` | Policy when controller is unreachable |
 | `controller_timeout_ms` | `2000` | HTTP timeout for controller calls |
-| `lookup_mode` | `occupancy` | `occupancy` or `prefix_lookup` |
+| `lookup_mode` | `occupancy` | `occupancy` (poll cache stats) or `prefix_lookup` (per-request exact match) |
 | `lmcache_worker_map` | — | Maps LMCache `instance_id` to router worker URL |
 
 **Scoring:** `score = cache_weight * normalized_key_count + (1 - cache_weight) * normalized_inverse_load`. The worker with the highest score is selected.

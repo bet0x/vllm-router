@@ -263,26 +263,48 @@ Polls `GET /controller/workers` every `poll_interval_secs` seconds. Each worker'
 
 **Limitation:** No prefix-level matching. Routing is based on total cache occupancy, not whether a specific prefix is cached on a worker. Still better than heuristic because `key_count` reflects real state including evictions.
 
-### Phase 2: Prefix lookup (planned)
+### Phase 2: Prefix lookup (implemented)
 
 `lookup_mode: prefix_lookup`
 
-Per-request `POST /lookup` to the controller with tokenized prompt. The controller returns which worker has the longest cached prefix for that specific request. This endpoint already exists in LMCache (`lmcache.v1.api_server`):
+Per-request prefix matching. For each incoming request, the router:
+
+1. **Tokenizes** the full request (including chat template) via a healthy vLLM worker's `POST /tokenize` endpoint
+2. **Looks up** the tokens via `POST {controller_url}/lookup` — the controller returns which worker has the longest cached prefix
+3. **Routes** to that worker as a `preferred_worker` — if it's healthy, the request goes there directly; otherwise falls back to occupancy scoring
 
 ```
 POST /lookup
-{"tokens": [1, 2, 3, 4, 5, ...]}
+{"tokens": [128000, 2675, 527, 459, ...]}
 
 Response:
 {"event_id": "...", "layout_info": {"vllm-001": ["LocalCPUBackend", 768]}}
 ```
 
-The `layout_info` maps `instance_id → (location, matched_token_count)`. This gives exact prefix-match routing.
+The `layout_info` maps `instance_id → (location, matched_token_count)`. The instance with the highest `matched_token_count` is selected.
 
-**Requirements for Phase 2:**
-- Router tokenizer must produce the same token IDs as vLLM/LMCache (same HuggingFace model)
-- Configure `tokenizer_model_map` to point to the exact same model
-- Adds per-request latency for the lookup call (mitigated by `controller_timeout_ms`)
+**Why tokenize via the worker?** LMCache stores KV cache keyed by the token IDs that vLLM actually processes — these include chat template tokens (`<|begin_of_text|>`, `<|start_header_id|>`, etc.) that are not present in the raw prompt text. The router passes the full request body (with `messages`) to `/tokenize` so vLLM applies the exact same chat template, producing matching token IDs.
+
+**Overhead:** ~2-7ms per request (tokenize + lookup). Acceptable when avoiding a KV cache miss saves 100-1000ms of re-prefill.
+
+**Fallback:** If `/tokenize` fails, `/lookup` times out, or no worker has a cached prefix, the request falls through to the normal occupancy-based scoring (Phase 1).
+
+#### Example config
+
+```yaml
+policy:
+  type: lmcache_aware
+  controller_url: "http://lmcache-controller:9000"
+  lookup_mode: prefix_lookup    # ← Phase 2
+  cache_weight: 0.7
+  fallback_policy: "power_of_two"
+  controller_timeout_ms: 2000
+  lmcache_worker_map:
+    "worker1": "http://vllm-worker-001:8000"
+    "worker2": "http://vllm-worker-002:8000"
+```
+
+See `configs/lmcache-prefix-lookup-local.yaml` for a complete local test example.
 
 ## PD disaggregation
 

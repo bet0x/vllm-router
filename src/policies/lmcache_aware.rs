@@ -21,6 +21,31 @@ use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, error, info, warn};
 
+// ── Phase 2: Prefix Lookup types ────────────────────────────────────────
+
+/// Request body for `POST {controller_url}/lookup`
+#[derive(serde::Serialize)]
+struct PrefixLookupRequest {
+    tokens: Vec<i64>,
+}
+
+/// Response from `POST {controller_url}/lookup`
+#[derive(Debug, serde::Deserialize)]
+struct PrefixLookupResponse {
+    #[allow(dead_code)]
+    event_id: String,
+    /// instance_id -> (location, matched_prefix_length)
+    layout_info: HashMap<String, (String, usize)>,
+}
+
+/// Response from `POST {worker_url}/tokenize`
+#[derive(serde::Deserialize)]
+struct TokenizeResponse {
+    tokens: Vec<i64>,
+    #[allow(dead_code)]
+    count: usize,
+}
+
 /// Configuration for the LMCache-aware policy
 #[derive(Debug, Clone)]
 pub struct LMCacheAwareConfig {
@@ -152,6 +177,146 @@ impl LMCacheAwarePolicy {
             LMCacheAwareConfig::default(),
             Arc::new(PowerOfTwoPolicy::new()),
         )
+    }
+
+    /// Whether this policy is in prefix_lookup mode
+    pub fn is_prefix_lookup_mode(&self) -> bool {
+        self.config.lookup_mode == "prefix_lookup"
+    }
+
+    /// Tokenize a request via a vLLM worker's `/tokenize` endpoint.
+    ///
+    /// Accepts the full request body (as JSON Value) so that vLLM can apply
+    /// the chat template when `messages` is present. This is critical because
+    /// LMCache stores KV cache keyed by the *template-applied* token IDs,
+    /// not the raw text tokens.
+    pub async fn tokenize_via_worker(
+        worker_url: &str,
+        request_body: &serde_json::Value,
+        timeout: Duration,
+    ) -> Option<Vec<i64>> {
+        let client = reqwest::Client::builder()
+            .timeout(timeout)
+            .build()
+            .ok()?;
+
+        let url = format!("{}/tokenize", worker_url);
+
+        match client.post(&url).json(request_body).send().await {
+            Ok(resp) if resp.status().is_success() => match resp.json::<TokenizeResponse>().await {
+                Ok(data) => {
+                    debug!(
+                        "Tokenized prompt via {}: {} tokens",
+                        worker_url,
+                        data.tokens.len()
+                    );
+                    Some(data.tokens)
+                }
+                Err(e) => {
+                    warn!("Failed to parse /tokenize response from {}: {}", worker_url, e);
+                    None
+                }
+            },
+            Ok(resp) => {
+                warn!(
+                    "Worker {} /tokenize returned status {}",
+                    worker_url,
+                    resp.status()
+                );
+                None
+            }
+            Err(e) => {
+                warn!("Failed to call /tokenize on {}: {}", worker_url, e);
+                None
+            }
+        }
+    }
+
+    /// Perform a prefix lookup against the LMCache controller.
+    ///
+    /// Sends the token IDs to `POST {controller_url}/lookup` and returns the
+    /// worker URL with the longest cached prefix, or `None` if the lookup
+    /// fails or no worker has any cached prefix.
+    pub async fn prefix_lookup(&self, tokens: &[i64]) -> Option<String> {
+        if tokens.is_empty() {
+            return None;
+        }
+
+        let timeout = Duration::from_millis(self.config.controller_timeout_ms.min(200));
+        let client = reqwest::Client::builder()
+            .timeout(timeout)
+            .build()
+            .ok()?;
+
+        let url = format!("{}/lookup", self.config.controller_url);
+        let req = PrefixLookupRequest {
+            tokens: tokens.to_vec(),
+        };
+
+        let mut request = client.post(&url).json(&req);
+        if let Some(ref key) = self.config.controller_api_key {
+            request = request.header("Authorization", format!("Bearer {}", key));
+        }
+
+        match request.send().await {
+            Ok(resp) if resp.status().is_success() => {
+                match resp.json::<PrefixLookupResponse>().await {
+                    Ok(data) => {
+                        // Find instance with longest cached prefix
+                        let best = data
+                            .layout_info
+                            .iter()
+                            .max_by_key(|(_, (_, prefix_len))| *prefix_len);
+
+                        if let Some((instance_id, (location, prefix_len))) = best {
+                            if *prefix_len == 0 {
+                                debug!("Prefix lookup: no cached prefix found for any worker");
+                                return None;
+                            }
+
+                            debug!(
+                                "Prefix lookup: best match instance={} location={} prefix_len={}",
+                                instance_id, location, prefix_len
+                            );
+
+                            // Map instance_id -> worker URL
+                            let map = self.instance_worker_map.read();
+                            if let Some(worker_url) = map.get(instance_id) {
+                                info!(
+                                    "Prefix lookup → {} (instance={}, cached={} tokens)",
+                                    worker_url, instance_id, prefix_len
+                                );
+                                Some(worker_url.clone())
+                            } else {
+                                warn!(
+                                    "Prefix lookup: instance_id '{}' not in worker map",
+                                    instance_id
+                                );
+                                None
+                            }
+                        } else {
+                            debug!("Prefix lookup: empty layout_info");
+                            None
+                        }
+                    }
+                    Err(e) => {
+                        warn!("Failed to parse /lookup response: {}", e);
+                        None
+                    }
+                }
+            }
+            Ok(resp) => {
+                warn!(
+                    "LMCache controller /lookup returned status {}",
+                    resp.status()
+                );
+                None
+            }
+            Err(e) => {
+                warn!("LMCache controller /lookup failed: {}", e);
+                None
+            }
+        }
     }
 
     /// Start the background polling task
@@ -557,6 +722,50 @@ mod tests {
         let idx = policy.select_worker(&workers, None).unwrap();
         // w1 has more cache (100 vs 10), should be preferred with cache_weight=0.7
         assert_eq!(idx, 0);
+    }
+
+    #[test]
+    fn test_is_prefix_lookup_mode() {
+        let config = LMCacheAwareConfig {
+            lookup_mode: "prefix_lookup".to_string(),
+            ..Default::default()
+        };
+        let policy = LMCacheAwarePolicy::new(config, Arc::new(RandomPolicy::new()));
+        assert!(policy.is_prefix_lookup_mode());
+
+        let policy2 = make_policy(0.7);
+        assert!(!policy2.is_prefix_lookup_mode());
+    }
+
+    #[test]
+    fn test_prefix_lookup_response_parsing() {
+        // Verify PrefixLookupResponse deserialization
+        let json = r#"{
+            "event_id": "Lookup-abc123",
+            "layout_info": {
+                "worker1": ["LocalCPU", 2048],
+                "worker2": ["LocalCPU", 512]
+            }
+        }"#;
+        let resp: super::PrefixLookupResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.layout_info.len(), 2);
+        assert_eq!(resp.layout_info["worker1"].1, 2048);
+        assert_eq!(resp.layout_info["worker2"].1, 512);
+
+        // Best match should be worker1
+        let best = resp
+            .layout_info
+            .iter()
+            .max_by_key(|(_, (_, prefix_len))| *prefix_len);
+        assert_eq!(best.unwrap().0, "worker1");
+    }
+
+    #[test]
+    fn test_tokenize_response_parsing() {
+        let json = r#"{"tokens": [128000, 849, 21435], "count": 3}"#;
+        let resp: super::TokenizeResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.tokens, vec![128000, 849, 21435]);
+        assert_eq!(resp.count, 3);
     }
 
     #[test]

@@ -1,0 +1,47 @@
+# LMCache-Aware routing — prefix_lookup mode (Phase 2)
+#
+# Same prerequisites as lmcache-aware-local.yaml, but uses per-request
+# prefix lookup instead of periodic occupancy polling.
+#
+# The router tokenizes each prompt via a healthy vLLM worker's /tokenize
+# endpoint, then queries POST {controller}/lookup to find the worker with
+# the longest cached prefix. If the lookup fails or no cache exists,
+# it falls back to occupancy-based scoring (Phase 1).
+#
+# Start:
+#   cargo run -- --config-file configs/lmcache-prefix-lookup-local.yaml
+
+host: "0.0.0.0"
+port: 3000
+log_level: info
+
+mode:
+  type: regular
+  worker_urls:
+    - "http://localhost:8010"
+    - "http://localhost:8020"
+
+policy:
+  type: lmcache_aware
+  controller_url: "http://localhost:9000"
+  poll_interval_secs: 10
+  cache_weight: 0.7
+  lookup_mode: prefix_lookup
+  fallback_policy: "power_of_two"
+  controller_timeout_ms: 2000
+
+  # Must match lmcache_instance_id in each worker's LMCache YAML
+  lmcache_worker_map:
+    "worker1": "http://localhost:8010"
+    "worker2": "http://localhost:8020"
+
+metrics:
+  host: "0.0.0.0"
+  port: 29000
+
+health_check:
+  check_interval_secs: 60
+  timeout_secs: 5
+  failure_threshold: 3
+  success_threshold: 2
+  endpoint: /health

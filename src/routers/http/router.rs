@@ -1031,6 +1031,62 @@ impl Router {
         Some(available[idx].clone())
     }
 
+    /// If the default policy is `lmcache_aware` in `prefix_lookup` mode,
+    /// tokenize the request via a healthy worker and query the LMCache
+    /// controller for the worker with the longest cached prefix.
+    ///
+    /// Passes the full request body (with `messages`) to `/tokenize` so
+    /// vLLM applies the chat template — critical because LMCache stores
+    /// KV cache keyed by template-applied token IDs.
+    ///
+    /// Returns `Some(worker)` when a match is found, `None` otherwise
+    /// (caller falls back to normal policy selection).
+    async fn lmcache_prefix_lookup_preferred<T: serde::Serialize>(
+        &self,
+        model_id: Option<&str>,
+        typed_req: &T,
+    ) -> Option<Arc<dyn Worker>> {
+        use crate::policies::LMCacheAwarePolicy;
+
+        // Get the policy and downcast to LMCacheAwarePolicy
+        let policy = match model_id {
+            Some(model) => self.policy_registry.get_policy_or_default(model),
+            None => self.policy_registry.get_default_policy(),
+        };
+        let lmcache_policy = policy.as_any().downcast_ref::<LMCacheAwarePolicy>()?;
+
+        if !lmcache_policy.is_prefix_lookup_mode() {
+            return None;
+        }
+
+        // Pick any healthy worker for tokenization (stateless operation)
+        let workers = self.worker_registry.get_all();
+        let healthy_worker_url = workers.iter().find(|w| w.is_available())?.url().to_string();
+
+        let timeout = std::time::Duration::from_millis(100);
+
+        // Serialize the request to JSON — /tokenize accepts the same body
+        // format as /v1/chat/completions (with messages + model)
+        let request_body = serde_json::to_value(typed_req).ok()?;
+
+        // Step 1: Tokenize via vLLM /tokenize (applies chat template)
+        let tokens = LMCacheAwarePolicy::tokenize_via_worker(
+            &healthy_worker_url,
+            &request_body,
+            timeout,
+        )
+        .await?;
+
+        // Step 2: POST /lookup to controller
+        let preferred_url = lmcache_policy.prefix_lookup(&tokens).await?;
+
+        // Step 3: Find the worker Arc in the registry
+        workers
+            .iter()
+            .find(|w| w.url() == preferred_url)
+            .cloned()
+    }
+
     /// Route a request through the exact-match cache for non-streaming requests.
     ///
     /// - If `is_stream` is true, bypasses the cache entirely (streaming responses
@@ -1196,6 +1252,18 @@ impl Router {
         let is_stream = typed_req.is_stream();
         let text = typed_req.extract_text_for_routing();
 
+        // ── LMCache prefix lookup pre-step (Phase 2) ──────────────────
+        // When the policy is lmcache_aware in prefix_lookup mode and no
+        // cluster-preferred worker is already set, perform an async lookup
+        // to find which worker has the longest cached prefix for this prompt.
+        let preferred_worker = if preferred_worker.is_none() {
+            self.lmcache_prefix_lookup_preferred(model_id, typed_req)
+                .await
+                .or(preferred_worker)
+        } else {
+            preferred_worker
+        };
+
         let response = RetryExecutor::execute_response_with_retry(
             &self.retry_config,
             // operation per attempt
@@ -1218,14 +1286,18 @@ impl Router {
                     }
                 };
 
-                let via_cluster = preferred_worker
+                let via_preferred = preferred_worker
                     .as_ref()
                     .map(|pw| pw.url() == worker.url())
                     .unwrap_or(false);
-                let routing_method = if via_cluster { "cluster" } else { "policy" };
+                let routing_method = if via_preferred {
+                    if cluster_name.is_some() { "cluster" } else { "lmcache_prefix" }
+                } else {
+                    "policy"
+                };
 
                 // Log the forwarding decision
-                if via_cluster {
+                if via_preferred && cluster_name.is_some() {
                     let cname = cluster_name.unwrap_or("?");
                     info!(
                         route,
@@ -1235,6 +1307,14 @@ impl Router {
                         "→ cluster routing"
                     );
                     RouterMetrics::record_cluster_request(cname, worker.url());
+                } else if via_preferred {
+                    info!(
+                        route,
+                        model = model_id.unwrap_or("?"),
+                        worker = worker.url(),
+                        routing = routing_method,
+                        "→ lmcache prefix routing"
+                    );
                 } else {
                     info!(
                         route,

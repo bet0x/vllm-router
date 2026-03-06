@@ -1,0 +1,45 @@
+# LMCache-Aware routing — local test environment
+#
+# Prerequisites (all on localhost):
+#   redis-server on :6379
+#   lmcache_controller --port 9000 --monitor-ports '{"pull":8300,"reply":8400}'
+#   vLLM worker1 on :8010 (LMCACHE_CONFIG_FILE=lmcache-worker1.yaml)
+#   vLLM worker2 on :8020 (LMCACHE_CONFIG_FILE=lmcache-worker2.yaml)
+#
+# Start:
+#   cargo run -- --config-file configs/lmcache-aware-local.yaml
+
+host: "0.0.0.0"
+port: 3000
+log_level: info
+
+mode:
+  type: regular
+  worker_urls:
+    - "http://localhost:8010"
+    - "http://localhost:8020"
+
+policy:
+  type: lmcache_aware
+  controller_url: "http://localhost:9000"
+  poll_interval_secs: 10
+  cache_weight: 0.7
+  lookup_mode: occupancy
+  fallback_policy: "power_of_two"
+  controller_timeout_ms: 2000
+
+  # Must match lmcache_instance_id in each worker's LMCache YAML
+  lmcache_worker_map:
+    "worker1": "http://localhost:8010"
+    "worker2": "http://localhost:8020"
+
+metrics:
+  host: "0.0.0.0"
+  port: 29000
+
+health_check:
+  check_interval_secs: 60
+  timeout_secs: 5
+  failure_threshold: 3
+  success_threshold: 2
+  endpoint: /health

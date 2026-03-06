@@ -5,6 +5,13 @@ Upstream: [vllm-project/router](https://github.com/vllm-project/router) | Fork: 
 
 ---
 
+## [0.6.11] — 2026-03-06
+
+### Added
+- **LMCache prefix lookup routing (Phase 2)** — `lookup_mode: prefix_lookup` in `lmcache_aware` policy. Per-request `POST /lookup` to the LMCache controller finds the worker with the longest cached KV prefix. Tokenizes via vLLM's `/tokenize` endpoint (with chat template) to produce matching token IDs. Falls back to occupancy scoring when lookup fails or no prefix is cached. See `configs/lmcache-prefix-lookup-local.yaml`.
+
+---
+
 ## [0.6.10] — 2026-03-06
 
 ### Added

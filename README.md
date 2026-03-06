@@ -24,7 +24,7 @@ A high-performance, lightweight request forwarding system for vLLM large-scale d
 | `POST /v1/embeddings` (OpenAI backend) | ❌ | ✅ Proxy |
 | `POST /v1/rerank` (OpenAI backend) | ❌ | ✅ Proxy |
 | gRPC `SessionParams` / `ModelInfo` proto | ❌ | ✅ In `vllm_scheduler.proto` |
-| LMCache-aware routing (`lmcache_aware`) | ❌ | ✅ Real KV cache state from LMCache controller |
+| LMCache-aware routing (`lmcache_aware`) | ❌ | ✅ Real KV cache state from LMCache controller (occupancy + prefix lookup) |
 | Per-routing-decision Prometheus metrics | ❌ | ✅ Worker, cluster, and fallback counters |
 | INFO-level routing logs | ❌ | ✅ Model, worker, method, status, duration |
 | Per-worker API keys | ❌ | ✅ Each backend can have its own `Authorization: Bearer` key |
@@ -72,6 +72,9 @@ vllm-router --config-file configs/test-semantic-cluster.yaml
 
 # LMCache-aware routing (real KV cache state from controller)
 vllm-router --config-file configs/lmcache-aware.yaml
+
+# LMCache prefix lookup (per-request exact prefix matching)
+vllm-router --config-file configs/lmcache-prefix-lookup-local.yaml
 ```
 
 ---
