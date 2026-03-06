@@ -10,7 +10,7 @@ use crate::{
         anthropic::{from_openai_response, translate_sse_chunk, MessagesRequest, SseState},
         spec::{
             ChatCompletionRequest, ChatCompletionResponse, CompletionRequest, EmbeddingRequest,
-            GenerateRequest, RerankRequest, ResponsesRequest, V1RerankReqInput,
+            GenerateRequest, RerankRequest, V1RerankReqInput,
         },
         worker_spec::{WorkerApiResponse, WorkerConfigRequest, WorkerErrorResponse},
     },
@@ -23,7 +23,7 @@ use crate::{
 };
 use axum::{
     body::Body,
-    extract::{Path, Query, Request, State},
+    extract::{DefaultBodyLimit, Path, Query, Request, State},
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::{delete, get, post},
@@ -313,7 +313,7 @@ async fn v1_rerank(
 async fn v1_responses(
     State(state): State<Arc<AppState>>,
     headers: http::HeaderMap,
-    Json(body): Json<ResponsesRequest>,
+    Json(body): Json<serde_json::Value>,
 ) -> Response {
     if let Err(response) = authorize_request(&state, &headers).await {
         return response;
@@ -321,7 +321,7 @@ async fn v1_responses(
 
     state
         .router
-        .route_responses(Some(&headers), &body, body.model.as_deref())
+        .route_transparent(Some(&headers), "/v1/responses", &http::Method::POST, body)
         .await
 }
 
@@ -1174,6 +1174,7 @@ pub fn build_app(
         .merge(admin_routes)
         .merge(worker_routes)
         // Request body size limiting
+        .layer(DefaultBodyLimit::max(max_payload_size))
         .layer(tower_http::limit::RequestBodyLimitLayer::new(
             max_payload_size,
         ))

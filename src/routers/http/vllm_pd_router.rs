@@ -163,14 +163,14 @@ impl VllmPDRouter {
                 // Create sampling_params with prefill defaults when missing
                 request["sampling_params"] = json!({"max_tokens": 1, "min_tokens": 1});
             }
+        } else if path.contains("/v1/responses") {
+            // Responses API: only uses max_output_tokens (not max_tokens/max_completion_tokens)
+            request["max_output_tokens"] = json!(1);
         } else {
-            // Fallback: OpenAI-style endpoints (chat/completions, responses)
+            // OpenAI chat/completions endpoints
             request["max_tokens"] = json!(1);
             if request.get("max_completion_tokens").is_some() {
                 request["max_completion_tokens"] = json!(1);
-            }
-            if request.get("max_output_tokens").is_some() {
-                request["max_output_tokens"] = json!(1);
             }
             // Also adjust min_tokens to ensure min_tokens <= max_tokens
             // This is required because vLLM validates that min_tokens <= max_tokens
@@ -1829,8 +1829,8 @@ mod tests {
         });
         let result = VllmPDRouter::prepare_prefill_request(request, "/v1/responses");
         assert_eq!(result["max_output_tokens"], 1);
-        // max_tokens should also be set to 1 (fallback path)
-        assert_eq!(result["max_tokens"], 1);
+        // Responses API doesn't use max_tokens, so it should not be injected
+        assert!(result.get("max_tokens").is_none());
         assert_eq!(result["stream"], false);
     }
 
@@ -1842,10 +1842,10 @@ mod tests {
             "stream": false
         });
         let result = VllmPDRouter::prepare_prefill_request(request, "/v1/responses");
-        // max_output_tokens was not set, so it should not appear
-        assert!(result.get("max_output_tokens").is_none());
-        // max_tokens should still be set to 1
-        assert_eq!(result["max_tokens"], 1);
+        // For /v1/responses, max_output_tokens should always be forced to 1
+        assert_eq!(result["max_output_tokens"], 1);
+        // max_tokens should NOT be set for Responses API
+        assert!(result.get("max_tokens").is_none());
         assert_eq!(result["stream"], false);
     }
 

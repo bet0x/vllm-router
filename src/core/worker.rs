@@ -602,6 +602,26 @@ impl DPAwareWorker {
             base_url,
         }
     }
+
+    pub fn with_api_key(mut self, api_key: Option<String>) -> Self {
+        self.base_worker = self.base_worker.with_api_key(api_key);
+        self
+    }
+
+    pub fn with_labels(mut self, labels: std::collections::HashMap<String, String>) -> Self {
+        self.base_worker = self.base_worker.with_labels(labels);
+        self
+    }
+
+    pub fn with_circuit_breaker_config(mut self, config: CircuitBreakerConfig) -> Self {
+        self.base_worker = self.base_worker.with_circuit_breaker_config(config);
+        self
+    }
+
+    pub fn with_health_config(mut self, config: HealthConfig) -> Self {
+        self.base_worker = self.base_worker.with_health_config(config);
+        self
+    }
 }
 
 #[async_trait]

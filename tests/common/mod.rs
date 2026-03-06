@@ -21,6 +21,7 @@ pub fn create_test_context(config: RouterConfig) -> Arc<AppContext> {
             config.max_concurrent_requests,
             config.rate_limit_tokens_per_second,
             config.api_key_validation_urls.clone(),
+            None,
         )
         .expect("Failed to create AppContext in test"),
     )

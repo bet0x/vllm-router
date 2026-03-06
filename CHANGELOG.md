@@ -5,6 +5,19 @@ Upstream: [vllm-project/router](https://github.com/vllm-project/router) | Fork: 
 
 ---
 
+## [0.6.10] — 2026-03-06
+
+### Added
+- **`DPAwareWorker` for PD and regular routers** — backport from upstream (#104). Use `DPAwareWorker` instead of `BasicWorker` when `intra_node_data_parallel_size > 1`, fixing URL corruption with `@rank` suffix in DP mode.
+- **`DefaultBodyLimit` for axum Json extractors** — backport from upstream (#109). Multimodal requests with base64 images exceeding 2MB no longer get 413 errors.
+- **`/v1/responses` routed via transparent proxy in PD mode** — backport from upstream (#99). Avoids 422 deserialization errors by forwarding raw JSON.
+- **Tool message `content` field as `Value`** — backport from upstream (#108). Preserves array content in tool messages instead of coercing to string.
+
+### Fixed
+- Integration tests now compile with all custom fields (`inbound_api_key`, `admin_api_key`, `worker_api_keys`, `cache`, `semantic_cache`, `semantic_cluster`, `tokenizer_model_map`).
+
+---
+
 ## [0.6.9] — 2026-03-06
 
 ### Added

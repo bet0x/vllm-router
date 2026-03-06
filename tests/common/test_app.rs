@@ -22,6 +22,7 @@ pub fn create_test_app(
             router_config.max_concurrent_requests,
             router_config.rate_limit_tokens_per_second,
             router_config.api_key_validation_urls.clone(),
+            None,
         )
         .expect("Failed to create AppContext in test"),
     );

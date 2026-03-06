@@ -5,8 +5,8 @@ use super::logprobs_merge;
 use super::pd_types::{api_path, PDRouterError};
 use crate::config::types::RetryConfig;
 use crate::core::{
-    is_retryable_status, BasicWorker, CircuitBreakerConfig, HealthConfig, RetryExecutor, Worker,
-    WorkerFactory, WorkerLoadGuard, WorkerRegistry, WorkerType,
+    is_retryable_status, BasicWorker, CircuitBreakerConfig, DPAwareWorker, HealthConfig,
+    RetryExecutor, Worker, WorkerFactory, WorkerLoadGuard, WorkerRegistry, WorkerType,
 };
 use crate::metrics::RouterMetrics;
 use crate::policies::{LoadBalancingPolicy, PolicyRegistry};
@@ -567,6 +567,15 @@ impl PDRouter {
 
         let mut prefill_workers_urls = vec![];
         let mut decode_workers_urls = vec![];
+        let dp_size = ctx.router_config.intra_node_data_parallel_size;
+        let health_config = HealthConfig {
+            timeout_secs: ctx.router_config.health_check.timeout_secs,
+            check_interval_secs: ctx.router_config.health_check.check_interval_secs,
+            endpoint: ctx.router_config.health_check.endpoint.clone(),
+            failure_threshold: ctx.router_config.health_check.failure_threshold,
+            success_threshold: ctx.router_config.health_check.success_threshold,
+        };
+
         // Register prefill workers in the registry
         for (url, port) in expanded_prefill_urls {
             prefill_workers_urls.push(url.clone());
@@ -576,22 +585,26 @@ impl PDRouter {
                 .worker_api_keys
                 .get(base_url_for_lookup)
                 .cloned();
-            let worker = BasicWorker::new(
-                url,
-                WorkerType::Prefill {
-                    bootstrap_port: port,
-                },
-            )
-            .with_api_key(worker_api_key)
-            .with_circuit_breaker_config(core_cb_config.clone())
-            .with_health_config(HealthConfig {
-                timeout_secs: ctx.router_config.health_check.timeout_secs,
-                check_interval_secs: ctx.router_config.health_check.check_interval_secs,
-                endpoint: ctx.router_config.health_check.endpoint.clone(),
-                failure_threshold: ctx.router_config.health_check.failure_threshold,
-                success_threshold: ctx.router_config.health_check.success_threshold,
-            });
-            ctx.worker_registry.register(Arc::new(worker));
+            let worker_type = WorkerType::Prefill {
+                bootstrap_port: port,
+            };
+            let worker: Arc<dyn Worker> = if dp_size > 1 {
+                let (base_url, dp_rank) = dp_utils::parse_worker_url(&url);
+                Arc::new(
+                    DPAwareWorker::new(base_url, dp_rank.unwrap_or(0), dp_size, worker_type)
+                        .with_api_key(worker_api_key)
+                        .with_circuit_breaker_config(core_cb_config.clone())
+                        .with_health_config(health_config.clone()),
+                )
+            } else {
+                Arc::new(
+                    BasicWorker::new(url, worker_type)
+                        .with_api_key(worker_api_key)
+                        .with_circuit_breaker_config(core_cb_config.clone())
+                        .with_health_config(health_config.clone()),
+                )
+            };
+            ctx.worker_registry.register(worker);
         }
 
         // Register decode workers in the registry
@@ -603,17 +616,23 @@ impl PDRouter {
                 .worker_api_keys
                 .get(base_url_for_lookup)
                 .cloned();
-            let worker = BasicWorker::new(url, WorkerType::Decode)
-                .with_api_key(worker_api_key)
-                .with_circuit_breaker_config(core_cb_config.clone())
-                .with_health_config(HealthConfig {
-                    timeout_secs: ctx.router_config.health_check.timeout_secs,
-                    check_interval_secs: ctx.router_config.health_check.check_interval_secs,
-                    endpoint: ctx.router_config.health_check.endpoint.clone(),
-                    failure_threshold: ctx.router_config.health_check.failure_threshold,
-                    success_threshold: ctx.router_config.health_check.success_threshold,
-                });
-            ctx.worker_registry.register(Arc::new(worker));
+            let worker: Arc<dyn Worker> = if dp_size > 1 {
+                let (base_url, dp_rank) = dp_utils::parse_worker_url(&url);
+                Arc::new(
+                    DPAwareWorker::new(base_url, dp_rank.unwrap_or(0), dp_size, WorkerType::Decode)
+                        .with_api_key(worker_api_key)
+                        .with_circuit_breaker_config(core_cb_config.clone())
+                        .with_health_config(health_config.clone()),
+                )
+            } else {
+                Arc::new(
+                    BasicWorker::new(url, WorkerType::Decode)
+                        .with_api_key(worker_api_key)
+                        .with_circuit_breaker_config(core_cb_config.clone())
+                        .with_health_config(health_config.clone()),
+                )
+            };
+            ctx.worker_registry.register(worker);
         }
 
         // Get all workers from registry for health check
