@@ -790,7 +790,7 @@ async fn admin_reload(
 }
 
 const AUTH_FAILURE_MESSAGE: &str =
-    "You must provide a valid API key. Obtain one from http://helmholtz.cloud";
+    "You must provide a valid API key. Obtain one from the panel or contact your administrator.";
 
 // ---------- Worker management endpoints (Legacy) ----------
 

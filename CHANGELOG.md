@@ -5,6 +5,13 @@ Upstream: [vllm-project/router](https://github.com/vllm-project/router) | Fork: 
 
 ---
 
+## [0.6.8] — 2026-03-06
+
+### Changed
+- Auth failure message now directs users to the panel or administrator instead of external URL.
+
+---
+
 ## [0.6.7] — 2026-03-05
 
 ### Changed
