@@ -1521,7 +1521,15 @@ fn create_cors_layer(allowed_origins: Vec<String>) -> tower_http::cors::CorsLaye
             .allow_origin(origins)
             .allow_methods([http::Method::GET, http::Method::POST, http::Method::OPTIONS])
             .allow_headers([http::header::CONTENT_TYPE, http::header::AUTHORIZATION])
-            .expose_headers([http::header::HeaderName::from_static("x-request-id")])
+            .expose_headers([
+                http::header::HeaderName::from_static("x-request-id"),
+                http::header::HeaderName::from_static("x-vllm-router-worker"),
+                http::header::HeaderName::from_static("x-vllm-router-method"),
+                http::header::HeaderName::from_static("x-vllm-router-policy"),
+                http::header::HeaderName::from_static("x-vllm-router-cluster"),
+                http::header::HeaderName::from_static("x-vllm-router-model"),
+                http::header::HeaderName::from_static("x-vllm-router-cache-status"),
+            ])
     };
 
     cors.max_age(Duration::from_secs(3600))

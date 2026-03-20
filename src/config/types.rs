@@ -134,6 +134,10 @@ pub struct RouterConfig {
     /// When `None` (the default), uses in-memory cache with default settings.
     #[serde(default)]
     pub cache: Option<CacheConfig>,
+    /// Include routing decision headers in responses (x-vllm-router-*).
+    /// Default: true.
+    #[serde(default = "default_expose_routing_headers")]
+    pub expose_routing_headers: bool,
 }
 
 fn default_policy() -> PolicyConfig {
@@ -372,6 +376,10 @@ impl Default for RedisCacheConfig {
             command_timeout_ms: default_redis_command_timeout_ms(),
         }
     }
+}
+
+fn default_expose_routing_headers() -> bool {
+    true
 }
 
 fn default_cache_backend() -> CacheBackend {
@@ -825,6 +833,7 @@ impl Default for RouterConfig {
             semantic_cache: None,
             semantic_cluster: None,
             cache: None,
+            expose_routing_headers: true,
         }
     }
 }
@@ -1403,6 +1412,7 @@ mod tests {
             semantic_cache: None,
             semantic_cluster: None,
             cache: None,
+            expose_routing_headers: true,
         };
 
         assert!(config.mode.is_pd_mode());
@@ -1477,6 +1487,7 @@ mod tests {
             semantic_cache: None,
             semantic_cluster: None,
             cache: None,
+            expose_routing_headers: true,
         };
 
         assert!(!config.mode.is_pd_mode());
@@ -1547,6 +1558,7 @@ mod tests {
             semantic_cache: None,
             semantic_cluster: None,
             cache: None,
+            expose_routing_headers: true,
         };
 
         assert!(config.has_service_discovery());

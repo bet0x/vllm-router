@@ -30,6 +30,52 @@ use std::time::{Duration, Instant};
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tracing::{debug, error, info, warn};
 
+// ── Routing decision headers ────────────────────────────────────────────────
+
+/// Metadata accumulated during the routing pipeline, injected as response
+/// headers when `expose_routing_headers` is enabled.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct RoutingDecision {
+    pub(crate) worker: Option<String>,
+    pub(crate) method: Option<&'static str>,
+    pub(crate) policy: Option<String>,
+    pub(crate) cluster: Option<String>,
+    pub(crate) model: Option<String>,
+    pub(crate) cache_status: Option<&'static str>,
+}
+
+impl RoutingDecision {
+    fn inject_headers(&self, resp: &mut Response) {
+        let h = resp.headers_mut();
+        if let Some(ref w) = self.worker {
+            if let Ok(v) = HeaderValue::from_str(w) {
+                h.insert("x-vllm-router-worker", v);
+            }
+        }
+        if let Some(m) = self.method {
+            h.insert("x-vllm-router-method", HeaderValue::from_static(m));
+        }
+        if let Some(ref p) = self.policy {
+            if let Ok(v) = HeaderValue::from_str(p) {
+                h.insert("x-vllm-router-policy", v);
+            }
+        }
+        if let Some(ref c) = self.cluster {
+            if let Ok(v) = HeaderValue::from_str(c) {
+                h.insert("x-vllm-router-cluster", v);
+            }
+        }
+        if let Some(ref model) = self.model {
+            if let Ok(v) = HeaderValue::from_str(model) {
+                h.insert("x-vllm-router-model", v);
+            }
+        }
+        if let Some(cs) = self.cache_status {
+            h.insert("x-vllm-router-cache-status", HeaderValue::from_static(cs));
+        }
+    }
+}
+
 /// Regular router that uses injected load balancing policies
 #[derive(Debug)]
 pub struct Router {
@@ -60,6 +106,8 @@ pub struct Router {
     embedding_timeout_ms: u64,
     /// Semantic cluster routing policy.  `None` when cluster routing is disabled.
     semantic_cluster: Option<Arc<crate::policies::SemanticClusterPolicy>>,
+    /// Whether to inject `x-vllm-router-*` decision headers into responses.
+    expose_routing_headers: bool,
 }
 
 impl Router {
@@ -289,6 +337,7 @@ impl Router {
             embeddings_model: embeddings_model.clone(),
             embedding_timeout_ms,
             semantic_cluster,
+            expose_routing_headers: ctx.router_config.expose_routing_headers,
         };
 
         if let Some(ref url) = embeddings_url {
@@ -1105,6 +1154,12 @@ impl Router {
     ) -> Response {
         use axum::http::header::CONTENT_TYPE;
 
+        let expose = self.expose_routing_headers;
+        let mut decision = RoutingDecision {
+            model: model_id.map(|s| s.to_string()),
+            ..Default::default()
+        };
+
         if !is_stream {
             if let Ok(json) = serde_json::to_value(typed_req) {
                 let cache_key = crate::cache::ResponseCache::compute_key(&json);
@@ -1118,6 +1173,9 @@ impl Router {
                             resp.headers_mut().insert(CONTENT_TYPE, val);
                         }
                     }
+                    decision.method = Some("cache-hit");
+                    decision.cache_status = Some("exact-hit");
+                    if expose { decision.inject_headers(&mut resp); }
                     return resp;
                 }
 
@@ -1144,9 +1202,14 @@ impl Router {
                                 resp.headers_mut().insert(CONTENT_TYPE, val);
                             }
                         }
+                        decision.method = Some("semantic-hit");
+                        decision.cache_status = Some("semantic-hit");
+                        if expose { decision.inject_headers(&mut resp); }
                         return resp;
                     }
                 }
+
+                decision.cache_status = Some("miss");
 
                 // 2b. Semantic cluster routing — pick the best-matching cluster worker.
                 // Returns (worker, cluster_name) so the cluster name can be logged + metered.
@@ -1177,7 +1240,7 @@ impl Router {
                 let cluster_worker = cluster_hit.as_ref().map(|(w, _)| w.clone());
 
                 // 3. Both caches missed — forward to backend
-                let upstream = self
+                let mut upstream = self
                     .route_typed_request(
                         headers,
                         typed_req,
@@ -1185,6 +1248,7 @@ impl Router {
                         model_id,
                         cluster_worker,
                         cluster_hit.as_ref().map(|(_, name)| *name),
+                        &mut decision,
                     )
                     .await;
 
@@ -1211,8 +1275,9 @@ impl Router {
                                 sem_cache.insert(emb, bytes.clone(), ct).await;
                             }
                             // Rebuild the response from the buffered bytes
-                            let resp =
+                            let mut resp =
                                 Response::from_parts(parts, axum::body::Body::from(bytes));
+                            if expose { decision.inject_headers(&mut resp); }
                             return resp;
                         }
                         Err(_) => {
@@ -1226,16 +1291,20 @@ impl Router {
                     }
                 }
 
+                if expose { decision.inject_headers(&mut upstream); }
                 return upstream;
             }
         }
 
         // Streaming or JSON serialisation failure — skip cache (no cluster hint)
-        self.route_typed_request(headers, typed_req, route, model_id, None, None)
-            .await
+        let mut resp = self
+            .route_typed_request(headers, typed_req, route, model_id, None, None, &mut decision)
+            .await;
+        if expose { decision.inject_headers(&mut resp); }
+        resp
     }
 
-    pub async fn route_typed_request<T: GenerationRequest + serde::Serialize + Clone>(
+    pub(crate) async fn route_typed_request<T: GenerationRequest + serde::Serialize + Clone>(
         &self,
         headers: Option<&HeaderMap>,
         typed_req: &T,
@@ -1247,6 +1316,8 @@ impl Router {
         // Name of the semantic cluster that selected `preferred_worker`, if any.
         // Used for logging and Prometheus metrics.
         cluster_name: Option<&str>,
+        // Accumulates routing metadata for explainability headers.
+        decision: &mut RoutingDecision,
     ) -> Response {
         let start = Instant::now();
         let is_stream = typed_req.is_stream();
@@ -1263,6 +1334,29 @@ impl Router {
         } else {
             preferred_worker
         };
+
+        // Pre-fill decision metadata that is known before the retry loop.
+        {
+            let via_preferred = preferred_worker.is_some();
+            if via_preferred && cluster_name.is_some() {
+                decision.method = Some("cluster");
+                decision.cluster = cluster_name.map(|s| s.to_string());
+            } else if via_preferred {
+                decision.method = Some("lmcache-prefix");
+            } else {
+                decision.method = Some("policy");
+                let policy = match model_id {
+                    Some(model) => self.policy_registry.get_policy_or_default(model),
+                    None => self.policy_registry.get_default_policy(),
+                };
+                decision.policy = Some(policy.name().to_string());
+            }
+        }
+
+        // Shared slot so the retry closure can report the final worker URL.
+        let last_worker_url: Arc<parking_lot::Mutex<Option<String>>> =
+            Arc::new(parking_lot::Mutex::new(None));
+        let last_worker_url_inner = last_worker_url.clone();
 
         let response = RetryExecutor::execute_response_with_retry(
             &self.retry_config,
@@ -1285,6 +1379,9 @@ impl Router {
                             .into_response();
                     }
                 };
+
+                // Record the worker URL for explainability headers.
+                *last_worker_url_inner.lock() = Some(worker.url().to_string());
 
                 let via_preferred = preferred_worker
                     .as_ref()
@@ -1394,6 +1491,9 @@ impl Router {
             || RouterMetrics::record_retries_exhausted(route),
         )
         .await;
+
+        // Populate the final worker URL from the last retry attempt.
+        decision.worker = last_worker_url.lock().take();
 
         let duration = start.elapsed();
         let status = response.status();
@@ -2332,8 +2432,10 @@ impl RouterTrait for Router {
         body: &GenerateRequest,
         model_id: Option<&str>,
     ) -> Response {
-        self.route_typed_request(headers, body, "/generate", model_id, None, None)
-            .await
+        let mut decision = RoutingDecision { model: model_id.map(|s| s.to_string()), ..Default::default() };
+        let mut resp = self.route_typed_request(headers, body, "/generate", model_id, None, None, &mut decision).await;
+        if self.expose_routing_headers { decision.inject_headers(&mut resp); }
+        resp
     }
 
     async fn route_chat(
@@ -2362,8 +2464,10 @@ impl RouterTrait for Router {
         body: &ResponsesRequest,
         model_id: Option<&str>,
     ) -> Response {
-        self.route_typed_request(headers, body, "/v1/responses", model_id, None, None)
-            .await
+        let mut decision = RoutingDecision { model: model_id.map(|s| s.to_string()), ..Default::default() };
+        let mut resp = self.route_typed_request(headers, body, "/v1/responses", model_id, None, None, &mut decision).await;
+        if self.expose_routing_headers { decision.inject_headers(&mut resp); }
+        resp
     }
 
     async fn get_response(&self, headers: Option<&HeaderMap>, response_id: &str) -> Response {
@@ -2384,9 +2488,11 @@ impl RouterTrait for Router {
     ) -> Response {
         // Record embeddings-specific metrics in addition to general request metrics
         let start = Instant::now();
-        let res = self
-            .route_typed_request(headers, body, "/v1/embeddings", model_id, None, None)
+        let mut decision = RoutingDecision { model: model_id.map(|s| s.to_string()), ..Default::default() };
+        let mut res = self
+            .route_typed_request(headers, body, "/v1/embeddings", model_id, None, None, &mut decision)
             .await;
+        if self.expose_routing_headers { decision.inject_headers(&mut res); }
 
         // Embedding specific metrics
         if res.status().is_success() {
@@ -2409,10 +2515,11 @@ impl RouterTrait for Router {
         if let Err(e) = body.validate() {
             return (StatusCode::BAD_REQUEST, e).into_response();
         }
+        let mut decision = RoutingDecision { model: model_id.map(|s| s.to_string()), ..Default::default() };
         let response = self
-            .route_typed_request(headers, body, "/v1/rerank", model_id, None, None)
+            .route_typed_request(headers, body, "/v1/rerank", model_id, None, None, &mut decision)
             .await;
-        if response.status().is_success() {
+        let mut final_resp = if response.status().is_success() {
             match Self::build_rerank_response(body, response).await {
                 Ok(rerank_response) => rerank_response,
                 Err(e) => {
@@ -2426,7 +2533,9 @@ impl RouterTrait for Router {
             }
         } else {
             response
-        }
+        };
+        if self.expose_routing_headers { decision.inject_headers(&mut final_resp); }
+        final_resp
     }
 
     async fn flush_cache(&self) -> Response {
@@ -2684,6 +2793,7 @@ mod tests {
             embeddings_model: "default".to_string(),
             embedding_timeout_ms: 500,
             semantic_cluster: None,
+            expose_routing_headers: false,
         }
     }
 
@@ -2764,6 +2874,7 @@ mod tests {
             embeddings_model: "default".to_string(),
             embedding_timeout_ms: 500,
             semantic_cluster: None,
+            expose_routing_headers: false,
         }
     }
 

@@ -738,6 +738,7 @@ impl CliArgs {
             semantic_cluster: None,
             // Cache backend config — only configurable via YAML config file.
             cache: None,
+            expose_routing_headers: true,
         })
     }
 
