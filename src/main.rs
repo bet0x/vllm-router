@@ -739,6 +739,7 @@ impl CliArgs {
             // Cache backend config — only configurable via YAML config file.
             cache: None,
             expose_routing_headers: true,
+            model_rules: Vec::new(),
         })
     }
 

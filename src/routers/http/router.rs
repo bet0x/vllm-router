@@ -132,6 +132,8 @@ pub struct Router {
     expose_routing_headers: bool,
     /// Ring buffer of recent routing decisions for admin visibility.
     decision_log: Arc<crate::admin::DecisionLog>,
+    /// Model name rewrite rules (alias, fallback chains).
+    model_rules: Vec<crate::model_rules::ModelRule>,
 }
 
 impl Router {
@@ -363,6 +365,7 @@ impl Router {
             semantic_cluster,
             expose_routing_headers: ctx.router_config.expose_routing_headers,
             decision_log: ctx.decision_log.clone(),
+            model_rules: ctx.router_config.model_rules.clone(),
         };
 
         if let Some(ref url) = embeddings_url {
@@ -485,6 +488,22 @@ impl Router {
         Some(Arc::new(
             crate::policies::SemanticClusterPolicy::from_parts(parts, config.threshold),
         ))
+    }
+
+    /// Resolve model rules: alias, fallback, wildcard rewrite.
+    /// Returns the (possibly rewritten) model name.
+    fn resolve_model<'a>(&self, model_id: Option<&'a str>, decision: &mut RoutingDecision) -> Option<String> {
+        if self.model_rules.is_empty() {
+            return model_id.map(|s| s.to_string());
+        }
+        let result = crate::model_rules::resolve(model_id, &self.model_rules, &self.worker_registry)?;
+        if let Some(ref orig) = result.original {
+            decision.model = Some(result.model.clone());
+            decision.method = None; // Will be set by the routing pipeline
+            // Store original for logging (method field reused below)
+            debug!(from = orig.as_str(), to = result.model.as_str(), "model resolved");
+        }
+        Some(result.model)
     }
 
     /// Build the exact-match response cache from config.
@@ -1180,10 +1199,12 @@ impl Router {
         use axum::http::header::CONTENT_TYPE;
 
         let expose = self.expose_routing_headers;
-        let mut decision = RoutingDecision {
-            model: model_id.map(|s| s.to_string()),
-            ..Default::default()
-        };
+        let mut decision = RoutingDecision::default();
+
+        // Resolve model rules (alias, fallback) before anything else.
+        let resolved_model = self.resolve_model(model_id, &mut decision);
+        let model_id = resolved_model.as_deref();
+        decision.model = model_id.map(|s| s.to_string());
 
         if !is_stream {
             if let Ok(json) = serde_json::to_value(typed_req) {
@@ -2467,7 +2488,10 @@ impl RouterTrait for Router {
         body: &GenerateRequest,
         model_id: Option<&str>,
     ) -> Response {
-        let mut decision = RoutingDecision { model: model_id.map(|s| s.to_string()), ..Default::default() };
+        let mut decision = RoutingDecision::default();
+        let resolved = self.resolve_model(model_id, &mut decision);
+        let model_id = resolved.as_deref();
+        decision.model = model_id.map(|s| s.to_string());
         let mut resp = self.route_typed_request(headers, body, "/generate", model_id, None, None, &mut decision).await;
         if self.expose_routing_headers { decision.inject_headers(&mut resp); }
         resp
@@ -2499,7 +2523,10 @@ impl RouterTrait for Router {
         body: &ResponsesRequest,
         model_id: Option<&str>,
     ) -> Response {
-        let mut decision = RoutingDecision { model: model_id.map(|s| s.to_string()), ..Default::default() };
+        let mut decision = RoutingDecision::default();
+        let resolved = self.resolve_model(model_id, &mut decision);
+        let model_id = resolved.as_deref();
+        decision.model = model_id.map(|s| s.to_string());
         let mut resp = self.route_typed_request(headers, body, "/v1/responses", model_id, None, None, &mut decision).await;
         if self.expose_routing_headers { decision.inject_headers(&mut resp); }
         resp
@@ -2523,7 +2550,10 @@ impl RouterTrait for Router {
     ) -> Response {
         // Record embeddings-specific metrics in addition to general request metrics
         let start = Instant::now();
-        let mut decision = RoutingDecision { model: model_id.map(|s| s.to_string()), ..Default::default() };
+        let mut decision = RoutingDecision::default();
+        let resolved = self.resolve_model(model_id, &mut decision);
+        let model_id = resolved.as_deref();
+        decision.model = model_id.map(|s| s.to_string());
         let mut res = self
             .route_typed_request(headers, body, "/v1/embeddings", model_id, None, None, &mut decision)
             .await;
@@ -2550,7 +2580,10 @@ impl RouterTrait for Router {
         if let Err(e) = body.validate() {
             return (StatusCode::BAD_REQUEST, e).into_response();
         }
-        let mut decision = RoutingDecision { model: model_id.map(|s| s.to_string()), ..Default::default() };
+        let mut decision = RoutingDecision::default();
+        let resolved = self.resolve_model(model_id, &mut decision);
+        let model_id = resolved.as_deref();
+        decision.model = model_id.map(|s| s.to_string());
         let response = self
             .route_typed_request(headers, body, "/v1/rerank", model_id, None, None, &mut decision)
             .await;
@@ -2841,6 +2874,7 @@ mod tests {
             semantic_cluster: None,
             expose_routing_headers: false,
             decision_log: Arc::new(crate::admin::DecisionLog::new(10)),
+            model_rules: Vec::new(),
         }
     }
 
@@ -2923,6 +2957,7 @@ mod tests {
             semantic_cluster: None,
             expose_routing_headers: false,
             decision_log: Arc::new(crate::admin::DecisionLog::new(10)),
+            model_rules: Vec::new(),
         }
     }
 

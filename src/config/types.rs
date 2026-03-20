@@ -138,6 +138,10 @@ pub struct RouterConfig {
     /// Default: true.
     #[serde(default = "default_expose_routing_headers")]
     pub expose_routing_headers: bool,
+    /// Model name rewrite rules. Evaluated before routing.
+    /// When empty (the default), model names pass through unchanged.
+    #[serde(default)]
+    pub model_rules: Vec<crate::model_rules::ModelRule>,
 }
 
 fn default_policy() -> PolicyConfig {
@@ -834,6 +838,7 @@ impl Default for RouterConfig {
             semantic_cluster: None,
             cache: None,
             expose_routing_headers: true,
+            model_rules: Vec::new(),
         }
     }
 }
@@ -1413,6 +1418,7 @@ mod tests {
             semantic_cluster: None,
             cache: None,
             expose_routing_headers: true,
+            model_rules: Vec::new(),
         };
 
         assert!(config.mode.is_pd_mode());
@@ -1488,6 +1494,7 @@ mod tests {
             semantic_cluster: None,
             cache: None,
             expose_routing_headers: true,
+            model_rules: Vec::new(),
         };
 
         assert!(!config.mode.is_pd_mode());
@@ -1559,6 +1566,7 @@ mod tests {
             semantic_cluster: None,
             cache: None,
             expose_routing_headers: true,
+            model_rules: Vec::new(),
         };
 
         assert!(config.has_service_discovery());

@@ -9,6 +9,7 @@ pub mod data_connector;
 pub mod grpc;
 pub mod metrics;
 pub mod middleware;
+pub mod model_rules;
 pub mod policies;
 pub mod protocols;
 pub mod routers;
