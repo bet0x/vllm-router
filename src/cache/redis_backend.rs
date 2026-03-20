@@ -312,6 +312,19 @@ impl SemanticCacheBackend for RedisSemanticCache {
         .await;
     }
 
+    async fn len(&self) -> usize {
+        let result = tokio::time::timeout(self.command_timeout, async {
+            let mut conn = match self.pool.get().await {
+                Ok(c) => c,
+                Err(_) => return 0usize,
+            };
+            let count: u64 = conn.get(self.counter_key()).await.unwrap_or(0);
+            count as usize
+        })
+        .await;
+        result.unwrap_or(0)
+    }
+
     fn threshold(&self) -> f32 {
         self.threshold
     }

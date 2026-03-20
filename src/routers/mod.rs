@@ -153,6 +153,16 @@ pub trait RouterTrait: Send + Sync + Debug + WorkerManagement {
         model_id: Option<&str>,
     ) -> Response;
 
+    /// Number of entries in the exact-match response cache.
+    async fn cache_len(&self) -> usize {
+        0
+    }
+
+    /// Number of entries in the semantic response cache.
+    async fn semantic_cache_len(&self) -> usize {
+        0
+    }
+
     /// Flush cache on all workers
     async fn flush_cache(&self) -> Response;
 

@@ -59,6 +59,8 @@ pub struct AppContext {
     pub inbound_api_key: Option<String>,
     /// Path to the YAML config file (for hot reload). None when started via CLI flags.
     pub config_file_path: Option<String>,
+    /// Ring buffer of recent routing decisions for /admin/decisions.
+    pub decision_log: Arc<crate::admin::DecisionLog>,
 }
 
 impl AppContext {
@@ -126,6 +128,7 @@ impl AppContext {
             admin_api_key,
             inbound_api_key,
             config_file_path,
+            decision_log: Arc::new(crate::admin::DecisionLog::new(1000)),
         })
     }
 }
@@ -136,6 +139,7 @@ pub struct AppState {
     pub context: Arc<AppContext>,
     pub concurrency_queue_tx: Option<tokio::sync::mpsc::Sender<QueuedRequest>>,
     pub router_manager: Option<Arc<RouterManager>>,
+    pub start_time: std::time::Instant,
 }
 
 // Fallback handler for unmatched routes
@@ -789,6 +793,111 @@ async fn admin_reload(
     .into_response()
 }
 
+/// GET /admin/config — return the active (redacted) configuration
+async fn admin_config(
+    State(state): State<Arc<AppState>>,
+    headers: http::HeaderMap,
+) -> Response {
+    if let Err(response) = authorize_admin_request(&state, &headers).await {
+        return response;
+    }
+    let mut config = serde_json::to_value(&state.context.router_config).unwrap_or_default();
+    // Redact sensitive fields
+    if let Some(obj) = config.as_object_mut() {
+        for key in &["api_key", "admin_api_key", "inbound_api_key"] {
+            if obj.get(*key).and_then(|v| v.as_str()).is_some() {
+                obj.insert(key.to_string(), json!("***"));
+            }
+        }
+        if let Some(wk) = obj.get_mut("worker_api_keys").and_then(|v| v.as_object_mut()) {
+            for val in wk.values_mut() {
+                *val = json!("***");
+            }
+        }
+        // Redact embeddings_api_key inside semantic_cache and semantic_cluster
+        for section in &["semantic_cache", "semantic_cluster"] {
+            if let Some(sc) = obj.get_mut(*section).and_then(|v| v.as_object_mut()) {
+                if sc.get("embeddings_api_key").and_then(|v| v.as_str()).is_some() {
+                    sc.insert("embeddings_api_key".to_string(), json!("***"));
+                }
+            }
+        }
+    }
+    Json(config).into_response()
+}
+
+/// GET /admin/stats — snapshot of internal state
+async fn admin_stats(
+    State(state): State<Arc<AppState>>,
+    headers: http::HeaderMap,
+) -> Response {
+    if let Err(response) = authorize_admin_request(&state, &headers).await {
+        return response;
+    }
+
+    let workers = state.context.worker_registry.get_all();
+    let healthy = workers.iter().filter(|w| w.is_healthy()).count();
+    let draining = workers.iter().filter(|w| w.is_draining()).count();
+
+    let exact_entries = state.router.cache_len().await;
+    let semantic_entries = state.router.semantic_cache_len().await;
+
+    let cache_backend = state
+        .context
+        .router_config
+        .cache
+        .as_ref()
+        .map(|c| format!("{:?}", c.backend).to_lowercase())
+        .unwrap_or_else(|| "memory".to_string());
+
+    // Policy assignments per model
+    let per_model = state.context.policy_registry.model_policies();
+
+    let default_policy = state.context.policy_registry.get_default_policy();
+
+    Json(json!({
+        "uptime_secs": state.start_time.elapsed().as_secs(),
+        "cache": {
+            "backend": cache_backend,
+            "exact_entries": exact_entries,
+            "semantic_entries": semantic_entries,
+        },
+        "workers": {
+            "total": workers.len(),
+            "healthy": healthy,
+            "draining": draining,
+        },
+        "policies": {
+            "default": default_policy.name(),
+            "per_model": per_model,
+        },
+        "decisions_logged": state.context.decision_log.len(),
+    }))
+    .into_response()
+}
+
+#[derive(Deserialize)]
+struct DecisionsQuery {
+    #[serde(default = "default_decisions_limit")]
+    limit: usize,
+}
+fn default_decisions_limit() -> usize {
+    50
+}
+
+/// GET /admin/decisions?limit=50 — recent routing decisions
+async fn admin_decisions(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<DecisionsQuery>,
+    headers: http::HeaderMap,
+) -> Response {
+    if let Err(response) = authorize_admin_request(&state, &headers).await {
+        return response;
+    }
+    let decisions = state.context.decision_log.recent(query.limit);
+    Json(json!({ "decisions": decisions })).into_response()
+}
+
 const AUTH_FAILURE_MESSAGE: &str =
     "You must provide a valid API key. Obtain one from the panel or contact your administrator.";
 
@@ -1158,7 +1267,10 @@ pub fn build_app(
         .route("/get_loads", get(get_loads))
         .route("/admin/drain", post(admin_drain))
         .route("/admin/drain/status", get(admin_drain_status))
-        .route("/admin/reload", post(admin_reload));
+        .route("/admin/reload", post(admin_reload))
+        .route("/admin/config", get(admin_config))
+        .route("/admin/stats", get(admin_stats))
+        .route("/admin/decisions", get(admin_decisions));
 
     // Worker management routes
     let worker_routes = Router::new()
@@ -1409,6 +1521,7 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
         context: app_context.clone(),
         concurrency_queue_tx: limiter.queue_tx.clone(),
         router_manager,
+        start_time: std::time::Instant::now(),
     });
     let router_arc = Arc::clone(&app_state.router);
 

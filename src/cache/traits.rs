@@ -36,6 +36,9 @@ pub trait SemanticCacheBackend: Send + Sync + std::fmt::Debug {
     /// Store a new embedding→response mapping.
     async fn insert(&self, embedding: Vec<f32>, body: Bytes, content_type: Option<String>);
 
+    /// Number of entries currently in the cache.
+    async fn len(&self) -> usize;
+
     /// The cosine similarity threshold for this cache instance.
     fn threshold(&self) -> f32;
 }

@@ -646,6 +646,7 @@ mod tests {
             admin_api_key: None,
             inbound_api_key: None,
             config_file_path: None,
+            decision_log: Arc::new(crate::admin::DecisionLog::new(10)),
         });
 
         let router = Router::new(vec![], &app_context).await.unwrap();

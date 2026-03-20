@@ -142,6 +142,15 @@ impl PolicyRegistry {
         Arc::clone(&self.default_policy)
     }
 
+    /// Return a map of model_id → policy name for all registered models.
+    pub fn model_policies(&self) -> HashMap<String, String> {
+        let policies = self.model_policies.read().unwrap();
+        policies
+            .iter()
+            .map(|(model, policy)| (model.clone(), policy.name().to_string()))
+            .collect()
+    }
+
     /// Get policy for a model, or default if not found
     pub fn get_policy_or_default(&self, model_id: &str) -> Arc<dyn LoadBalancingPolicy> {
         self.get_policy(model_id)

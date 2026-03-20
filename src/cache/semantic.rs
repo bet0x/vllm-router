@@ -153,6 +153,10 @@ impl SemanticCacheBackend for SemanticCache {
         self.insert(embedding, body, content_type);
     }
 
+    async fn len(&self) -> usize {
+        self.entries.read().len()
+    }
+
     fn threshold(&self) -> f32 {
         self.threshold
     }

@@ -45,6 +45,28 @@ pub(crate) struct RoutingDecision {
 }
 
 impl RoutingDecision {
+    fn to_record(
+        &self,
+        request_id: Option<&str>,
+        route: &str,
+        status: u16,
+        duration_ms: u64,
+    ) -> crate::admin::DecisionRecord {
+        crate::admin::DecisionRecord {
+            timestamp: crate::admin::decision_log::now_iso8601(),
+            request_id: request_id.map(|s| s.to_string()),
+            route: route.to_string(),
+            model: self.model.clone(),
+            method: self.method.map(|s| s.to_string()),
+            policy: self.policy.clone(),
+            cluster: self.cluster.clone(),
+            worker: self.worker.clone(),
+            cache_status: self.cache_status.map(|s| s.to_string()),
+            status,
+            duration_ms,
+        }
+    }
+
     fn inject_headers(&self, resp: &mut Response) {
         let h = resp.headers_mut();
         if let Some(ref w) = self.worker {
@@ -108,6 +130,8 @@ pub struct Router {
     semantic_cluster: Option<Arc<crate::policies::SemanticClusterPolicy>>,
     /// Whether to inject `x-vllm-router-*` decision headers into responses.
     expose_routing_headers: bool,
+    /// Ring buffer of recent routing decisions for admin visibility.
+    decision_log: Arc<crate::admin::DecisionLog>,
 }
 
 impl Router {
@@ -338,6 +362,7 @@ impl Router {
             embedding_timeout_ms,
             semantic_cluster,
             expose_routing_headers: ctx.router_config.expose_routing_headers,
+            decision_log: ctx.decision_log.clone(),
         };
 
         if let Some(ref url) = embeddings_url {
@@ -1176,6 +1201,7 @@ impl Router {
                     decision.method = Some("cache-hit");
                     decision.cache_status = Some("exact-hit");
                     if expose { decision.inject_headers(&mut resp); }
+                    self.decision_log.push(decision.to_record(None, route, 200, 0));
                     return resp;
                 }
 
@@ -1205,6 +1231,7 @@ impl Router {
                         decision.method = Some("semantic-hit");
                         decision.cache_status = Some("semantic-hit");
                         if expose { decision.inject_headers(&mut resp); }
+                        self.decision_log.push(decision.to_record(None, route, 200, 0));
                         return resp;
                     }
                 }
@@ -1517,6 +1544,14 @@ impl Router {
                 "← failed"
             );
         }
+
+        // Record the decision for /admin/decisions.
+        self.decision_log.push(decision.to_record(
+            None, // request_id not available here; set by middleware
+            route,
+            status.as_u16(),
+            duration.as_millis() as u64,
+        ));
 
         response
     }
@@ -2538,6 +2573,17 @@ impl RouterTrait for Router {
         final_resp
     }
 
+    async fn cache_len(&self) -> usize {
+        self.response_cache.len().await
+    }
+
+    async fn semantic_cache_len(&self) -> usize {
+        match &self.semantic_cache {
+            Some(sc) => sc.len().await,
+            None => 0,
+        }
+    }
+
     async fn flush_cache(&self) -> Response {
         // Get all worker URLs
         let worker_urls = self.get_worker_urls();
@@ -2794,6 +2840,7 @@ mod tests {
             embedding_timeout_ms: 500,
             semantic_cluster: None,
             expose_routing_headers: false,
+            decision_log: Arc::new(crate::admin::DecisionLog::new(10)),
         }
     }
 
@@ -2875,6 +2922,7 @@ mod tests {
             embedding_timeout_ms: 500,
             semantic_cluster: None,
             expose_routing_headers: false,
+            decision_log: Arc::new(crate::admin::DecisionLog::new(10)),
         }
     }
 
