@@ -142,6 +142,11 @@ pub struct RouterConfig {
     /// When empty (the default), model names pass through unchanged.
     #[serde(default)]
     pub model_rules: Vec<crate::model_rules::ModelRule>,
+    /// Pre-routing hooks — HTTP callouts to external services that run before
+    /// routing. Can allow, reject, or transform request bodies.
+    /// When empty (the default), no hooks are executed.
+    #[serde(default)]
+    pub pre_routing_hooks: Vec<crate::hooks::PreRoutingHook>,
 }
 
 fn default_policy() -> PolicyConfig {
@@ -839,6 +844,7 @@ impl Default for RouterConfig {
             cache: None,
             expose_routing_headers: true,
             model_rules: Vec::new(),
+            pre_routing_hooks: Vec::new(),
         }
     }
 }
@@ -1419,6 +1425,7 @@ mod tests {
             cache: None,
             expose_routing_headers: true,
             model_rules: Vec::new(),
+            pre_routing_hooks: Vec::new(),
         };
 
         assert!(config.mode.is_pd_mode());
@@ -1495,6 +1502,7 @@ mod tests {
             cache: None,
             expose_routing_headers: true,
             model_rules: Vec::new(),
+            pre_routing_hooks: Vec::new(),
         };
 
         assert!(!config.mode.is_pd_mode());
@@ -1567,6 +1575,7 @@ mod tests {
             cache: None,
             expose_routing_headers: true,
             model_rules: Vec::new(),
+            pre_routing_hooks: Vec::new(),
         };
 
         assert!(config.has_service_discovery());

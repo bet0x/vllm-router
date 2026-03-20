@@ -740,6 +740,7 @@ impl CliArgs {
             cache: None,
             expose_routing_headers: true,
             model_rules: Vec::new(),
+            pre_routing_hooks: Vec::new(),
         })
     }
 

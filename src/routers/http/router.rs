@@ -42,6 +42,7 @@ pub(crate) struct RoutingDecision {
     pub(crate) cluster: Option<String>,
     pub(crate) model: Option<String>,
     pub(crate) cache_status: Option<&'static str>,
+    pub(crate) hooks_ran: Vec<String>,
 }
 
 impl RoutingDecision {
@@ -95,6 +96,11 @@ impl RoutingDecision {
         if let Some(cs) = self.cache_status {
             h.insert("x-vllm-router-cache-status", HeaderValue::from_static(cs));
         }
+        if !self.hooks_ran.is_empty() {
+            if let Ok(v) = HeaderValue::from_str(&self.hooks_ran.join(",")) {
+                h.insert("x-vllm-router-hooks", v);
+            }
+        }
     }
 }
 
@@ -134,6 +140,8 @@ pub struct Router {
     decision_log: Arc<crate::admin::DecisionLog>,
     /// Model name rewrite rules (alias, fallback chains).
     model_rules: Vec<crate::model_rules::ModelRule>,
+    /// Pre-routing hooks configuration.
+    pre_routing_hooks: Vec<crate::hooks::PreRoutingHook>,
 }
 
 impl Router {
@@ -366,6 +374,7 @@ impl Router {
             expose_routing_headers: ctx.router_config.expose_routing_headers,
             decision_log: ctx.decision_log.clone(),
             model_rules: ctx.router_config.model_rules.clone(),
+            pre_routing_hooks: ctx.router_config.pre_routing_hooks.clone(),
         };
 
         if let Some(ref url) = embeddings_url {
@@ -1188,7 +1197,7 @@ impl Router {
     /// - On a cache miss, delegates to `route_typed_request`. If the response is
     ///   successful (2xx), the response body is buffered, stored in the cache, and
     ///   a new Response is constructed from the bytes.
-    async fn route_with_cache<T: GenerationRequest + serde::Serialize + Clone>(
+    async fn route_with_cache<T: GenerationRequest + serde::Serialize + serde::de::DeserializeOwned + Clone>(
         &self,
         headers: Option<&HeaderMap>,
         typed_req: &T,
@@ -1205,6 +1214,35 @@ impl Router {
         let resolved_model = self.resolve_model(model_id, &mut decision);
         let model_id = resolved_model.as_deref();
         decision.model = model_id.map(|s| s.to_string());
+
+        // Execute pre-routing hooks (safety checks, PII masking, etc.).
+        let (typed_req, hooks_ran) = if !self.pre_routing_hooks.is_empty() {
+            let body_json = match serde_json::to_value(typed_req) {
+                Ok(j) => j,
+                Err(_) => {
+                    return (StatusCode::BAD_REQUEST, "Failed to serialize request for hooks")
+                        .into_response();
+                }
+            };
+            match crate::hooks::execute(&self.pre_routing_hooks, &self.client, body_json).await {
+                crate::hooks::HookOutcome::Allow { body, hooks_ran } => {
+                    // Re-deserialize in case a hook transformed the body
+                    match serde_json::from_value::<T>(body) {
+                        Ok(new_req) => (std::borrow::Cow::Owned(new_req), hooks_ran),
+                        Err(e) => {
+                            warn!(error = %e, "hook transformed body is not valid for this request type");
+                            return (StatusCode::BAD_REQUEST, "Hook produced invalid request body")
+                                .into_response();
+                        }
+                    }
+                }
+                crate::hooks::HookOutcome::Reject(resp) => return resp,
+            }
+        } else {
+            (std::borrow::Cow::Borrowed(typed_req), Vec::new())
+        };
+        let typed_req = typed_req.as_ref();
+        decision.hooks_ran = hooks_ran;
 
         if !is_stream {
             if let Ok(json) = serde_json::to_value(typed_req) {
@@ -2875,6 +2913,7 @@ mod tests {
             expose_routing_headers: false,
             decision_log: Arc::new(crate::admin::DecisionLog::new(10)),
             model_rules: Vec::new(),
+            pre_routing_hooks: Vec::new(),
         }
     }
 
@@ -2958,6 +2997,7 @@ mod tests {
             expose_routing_headers: false,
             decision_log: Arc::new(crate::admin::DecisionLog::new(10)),
             model_rules: Vec::new(),
+            pre_routing_hooks: Vec::new(),
         }
     }
 

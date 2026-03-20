@@ -5,6 +5,7 @@ pub mod logging;
 
 pub mod core;
 pub mod data_connector;
+pub mod hooks;
 #[cfg(feature = "grpc-client")]
 pub mod grpc;
 pub mod metrics;
