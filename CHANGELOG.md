@@ -5,6 +5,17 @@ Upstream: [vllm-project/router](https://github.com/vllm-project/router) | Fork: 
 
 ---
 
+## [0.7.1] — 2026-03-20
+
+### Added
+- **OpenTelemetry distributed tracing** (backport upstream #122, Andrew Bennett/Meta) — opt-in OTLP tracing via `trace_config` YAML section. Core init/layer integrated into logging subscriber; full request-level span instrumentation to follow incrementally.
+- **OTel tests and benchmark** — `otel_disabled_path_test` (3 tests), `otel_disabled_path` benchmark, `mock_worker` capture functions, `test_app` with tracing toggle.
+
+### Fixed
+- **Consistent hash header priority** (backport upstream PR #125) — `x-correlation-id` now checked before `x-request-id`, fixing prefix cache affinity in multi-turn conversations.
+
+---
+
 ## [0.7.0] — 2026-03-20
 
 ### Added
