@@ -43,6 +43,7 @@ pub(crate) struct RoutingDecision {
     pub(crate) model: Option<String>,
     pub(crate) cache_status: Option<&'static str>,
     pub(crate) hooks_ran: Vec<String>,
+    pub(crate) request_text: Option<String>,
 }
 
 impl RoutingDecision {
@@ -65,6 +66,7 @@ impl RoutingDecision {
             cache_status: self.cache_status.map(|s| s.to_string()),
             status,
             duration_ms,
+            request_text: self.request_text.clone(),
         }
     }
 
@@ -142,6 +144,8 @@ pub struct Router {
     model_rules: Vec<crate::model_rules::ModelRule>,
     /// Pre-routing hooks configuration.
     pre_routing_hooks: Vec<crate::hooks::PreRoutingHook>,
+    /// Whether to capture request text in decision records (for replay).
+    include_request_text: bool,
 }
 
 impl Router {
@@ -375,6 +379,7 @@ impl Router {
             decision_log: ctx.decision_log.clone(),
             model_rules: ctx.router_config.model_rules.clone(),
             pre_routing_hooks: ctx.router_config.pre_routing_hooks.clone(),
+            include_request_text: ctx.router_config.decision_log.as_ref().map(|d| d.include_request_text).unwrap_or(false),
         };
 
         if let Some(ref url) = embeddings_url {
@@ -1408,6 +1413,10 @@ impl Router {
         let start = Instant::now();
         let is_stream = typed_req.is_stream();
         let text = typed_req.extract_text_for_routing();
+
+        if self.include_request_text {
+            decision.request_text = Some(text.clone());
+        }
 
         // ── LMCache prefix lookup pre-step (Phase 2) ──────────────────
         // When the policy is lmcache_aware in prefix_lookup mode and no
@@ -2914,6 +2923,7 @@ mod tests {
             decision_log: Arc::new(crate::admin::DecisionLog::new(10)),
             model_rules: Vec::new(),
             pre_routing_hooks: Vec::new(),
+            include_request_text: false,
         }
     }
 
@@ -2998,6 +3008,7 @@ mod tests {
             decision_log: Arc::new(crate::admin::DecisionLog::new(10)),
             model_rules: Vec::new(),
             pre_routing_hooks: Vec::new(),
+            include_request_text: false,
         }
     }
 

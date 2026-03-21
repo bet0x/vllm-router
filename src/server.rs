@@ -1525,6 +1525,15 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
     });
     let router_arc = Arc::clone(&app_state.router);
 
+    // Start decision log export if configured
+    if let Some(ref dl_config) = config.router_config.decision_log {
+        crate::admin::decision_log::spawn_export_task(
+            app_context.decision_log.clone(),
+            dl_config.export_path.clone(),
+            dl_config.export_interval_secs,
+        );
+    }
+
     // Start the service discovery if enabled
     if let Some(service_discovery_config) = config.service_discovery_config {
         if service_discovery_config.enabled {

@@ -12,6 +12,7 @@ pub mod metrics;
 pub mod middleware;
 pub mod model_rules;
 pub mod policies;
+pub mod replay;
 pub mod protocols;
 pub mod routers;
 pub mod server;

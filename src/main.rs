@@ -741,6 +741,7 @@ impl CliArgs {
             expose_routing_headers: true,
             model_rules: Vec::new(),
             pre_routing_hooks: Vec::new(),
+            decision_log: None,
         })
     }
 
@@ -798,6 +799,13 @@ impl CliArgs {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     dotenvy::dotenv().ok();
+
+    // Check for `replay` subcommand before full CLI parsing.
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(|s| s.as_str()) == Some("replay") {
+        return run_replay(&args[2..]);
+    }
+
     println!("DEBUG: Main function started");
 
     // Parse prefill arguments manually before clap parsing
@@ -939,6 +947,59 @@ translate to the backend's OpenAI-compatible chat endpoint."
     // Block on the async startup function
     println!("DEBUG: Starting server startup function");
     runtime.block_on(async move { server::startup(server_config).await })?;
+
+    Ok(())
+}
+
+/// Run the `vllm-router replay` subcommand.
+fn run_replay(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let mut decisions_path: Option<String> = None;
+    let mut config_path: Option<String> = None;
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--decisions" if i + 1 < args.len() => {
+                decisions_path = Some(args[i + 1].clone());
+                i += 2;
+            }
+            "--config" if i + 1 < args.len() => {
+                config_path = Some(args[i + 1].clone());
+                i += 2;
+            }
+            "--help" | "-h" => {
+                eprintln!("Usage: vllm-router replay --decisions <file.jsonl> --config <config.yaml>");
+                eprintln!();
+                eprintln!("Re-evaluate routing decisions from a JSONL export against a different config.");
+                eprintln!("Produces a comparison report showing how many requests would be routed differently.");
+                std::process::exit(0);
+            }
+            other => {
+                eprintln!("Unknown argument: {}", other);
+                eprintln!("Usage: vllm-router replay --decisions <file.jsonl> --config <config.yaml>");
+                std::process::exit(1);
+            }
+        }
+    }
+
+    let decisions_path = decisions_path.ok_or("--decisions <file.jsonl> is required")?;
+    let config_path = config_path.ok_or("--config <config.yaml> is required")?;
+
+    // Load decisions
+    let decisions = vllm_router_rs::replay::load_decisions(std::path::Path::new(&decisions_path))?;
+    eprintln!("Loaded {} decisions from {}", decisions.len(), decisions_path);
+
+    // Load new config
+    let config_content = std::fs::read_to_string(&config_path)
+        .map_err(|e| format!("Failed to read {}: {}", config_path, e))?;
+    let new_config: RouterConfig = serde_yaml::from_str(&config_content)
+        .map_err(|e| format!("Failed to parse {}: {}", config_path, e))?;
+    eprintln!("Config: {} (policy: {})", config_path, new_config.policy.name());
+
+    // Run replay
+    let report = vllm_router_rs::replay::replay(&decisions, &new_config);
+    println!();
+    report.print();
 
     Ok(())
 }

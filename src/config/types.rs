@@ -147,6 +147,30 @@ pub struct RouterConfig {
     /// When empty (the default), no hooks are executed.
     #[serde(default)]
     pub pre_routing_hooks: Vec<crate::hooks::PreRoutingHook>,
+    /// Decision log export configuration.
+    /// When `None` (the default), decisions are kept in memory only.
+    #[serde(default)]
+    pub decision_log: Option<DecisionLogConfig>,
+}
+
+/// Decision log export configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DecisionLogConfig {
+    /// Path to write decisions as JSONL. When set, a background task flushes
+    /// new entries to this file periodically.
+    pub export_path: String,
+    /// Flush interval in seconds. Default: 10.
+    #[serde(default = "default_export_interval_secs")]
+    pub export_interval_secs: u64,
+    /// Include request text (prompt content) in exported records.
+    /// Disabled by default for privacy. Required for replaying content-aware
+    /// policies (cache_aware, semantic_cluster).
+    #[serde(default)]
+    pub include_request_text: bool,
+}
+
+fn default_export_interval_secs() -> u64 {
+    10
 }
 
 fn default_policy() -> PolicyConfig {
@@ -845,6 +869,7 @@ impl Default for RouterConfig {
             expose_routing_headers: true,
             model_rules: Vec::new(),
             pre_routing_hooks: Vec::new(),
+            decision_log: None,
         }
     }
 }
@@ -1426,6 +1451,7 @@ mod tests {
             expose_routing_headers: true,
             model_rules: Vec::new(),
             pre_routing_hooks: Vec::new(),
+            decision_log: None,
         };
 
         assert!(config.mode.is_pd_mode());
@@ -1503,6 +1529,7 @@ mod tests {
             expose_routing_headers: true,
             model_rules: Vec::new(),
             pre_routing_hooks: Vec::new(),
+            decision_log: None,
         };
 
         assert!(!config.mode.is_pd_mode());
@@ -1576,6 +1603,7 @@ mod tests {
             expose_routing_headers: true,
             model_rules: Vec::new(),
             pre_routing_hooks: Vec::new(),
+            decision_log: None,
         };
 
         assert!(config.has_service_discovery());
