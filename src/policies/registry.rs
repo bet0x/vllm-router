@@ -4,10 +4,7 @@
 /// When the first worker of a new model is added, it determines the policy for that model.
 /// All subsequent workers of the same model use the established policy.
 /// When the last worker of a model is removed, the policy mapping is cleaned up.
-use super::{
-    CacheAwareConfig, CacheAwarePolicy, ConsistentHashPolicy, LMCacheAwarePolicy,
-    LoadBalancingPolicy, PowerOfTwoPolicy, RandomPolicy, RoundRobinPolicy,
-};
+use super::LoadBalancingPolicy;
 use crate::config::types::PolicyConfig;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -174,49 +171,19 @@ impl PolicyRegistry {
         Arc::clone(&self.default_policy)
     }
 
-    /// Create a policy from a type string
+    /// Create a policy from a type string, delegating to the global factory.
     fn create_policy_from_type(&self, policy_type: &str) -> Arc<dyn LoadBalancingPolicy> {
-        match policy_type {
-            "round_robin" => Arc::new(RoundRobinPolicy::new()),
-            "random" => Arc::new(RandomPolicy::new()),
-            "cache_aware" => Arc::new(CacheAwarePolicy::new()),
-            "power_of_two" => Arc::new(PowerOfTwoPolicy::new()),
-            "lmcache_aware" => Arc::new(LMCacheAwarePolicy::with_defaults()),
-            _ => {
+        super::factory::global_factory()
+            .create_by_name(policy_type)
+            .unwrap_or_else(|| {
                 warn!("Unknown policy type '{}', using default", policy_type);
                 Arc::clone(&self.default_policy)
-            }
-        }
+            })
     }
 
-    /// Create a policy from a PolicyConfig
+    /// Create a policy from a PolicyConfig, delegating to the global factory.
     fn create_policy_from_config(config: &PolicyConfig) -> Arc<dyn LoadBalancingPolicy> {
-        match config {
-            PolicyConfig::RoundRobin => Arc::new(RoundRobinPolicy::new()),
-            PolicyConfig::Random => Arc::new(RandomPolicy::new()),
-            PolicyConfig::CacheAware {
-                cache_threshold,
-                balance_abs_threshold,
-                balance_rel_threshold,
-                eviction_interval_secs,
-                max_tree_size,
-            } => {
-                let cache_config = CacheAwareConfig {
-                    cache_threshold: *cache_threshold,
-                    balance_abs_threshold: *balance_abs_threshold,
-                    balance_rel_threshold: *balance_rel_threshold,
-                    eviction_interval_secs: *eviction_interval_secs,
-                    max_tree_size: *max_tree_size,
-                };
-                Arc::new(CacheAwarePolicy::with_config(cache_config))
-            }
-            PolicyConfig::PowerOfTwo { .. } => Arc::new(PowerOfTwoPolicy::new()),
-            PolicyConfig::ConsistentHash { .. } => Arc::new(ConsistentHashPolicy::new()),
-            PolicyConfig::LMCacheAware { .. } => {
-                // Use the factory for full config-aware creation
-                super::PolicyFactory::create_from_config(config)
-            }
-        }
+        super::factory::global_factory().create_from_config(config)
     }
 
     /// Get current model->policy mappings (for debugging/monitoring)

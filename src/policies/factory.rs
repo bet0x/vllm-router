@@ -1,18 +1,66 @@
-//! Factory for creating load balancing policies
+//! Factory and registry for creating load balancing policies.
+//!
+//! Builtin policies are registered at startup. External code can register
+//! additional policies by name before the server starts, making the factory
+//! extensible without modifying this file.
 
 use super::{
     CacheAwareConfig, CacheAwarePolicy, ConsistentHashPolicy, LMCacheAwareConfig,
     LMCacheAwarePolicy, LoadBalancingPolicy, PowerOfTwoPolicy, RandomPolicy, RoundRobinPolicy,
 };
 use crate::config::PolicyConfig;
+use parking_lot::RwLock;
+use std::collections::HashMap;
 use std::sync::Arc;
 
-/// Factory for creating policy instances
-pub struct PolicyFactory;
+/// Type alias for a policy constructor function.
+/// Receives no config (for `create_by_name` / dynamic creation).
+type PolicyConstructor = Box<dyn Fn() -> Arc<dyn LoadBalancingPolicy> + Send + Sync>;
+
+/// Factory for creating policy instances.
+///
+/// Maintains a registry of name → constructor mappings. Builtin policies are
+/// registered automatically; external policies can be added via [`register`].
+pub struct PolicyFactory {
+    registry: RwLock<HashMap<String, PolicyConstructor>>,
+}
 
 impl PolicyFactory {
-    /// Create a policy from configuration
-    pub fn create_from_config(config: &PolicyConfig) -> Arc<dyn LoadBalancingPolicy> {
+    /// Create a new factory with all builtin policies registered.
+    pub fn new() -> Self {
+        let factory = Self {
+            registry: RwLock::new(HashMap::new()),
+        };
+        factory.register_builtins();
+        factory
+    }
+
+    /// Register a policy constructor by name.
+    ///
+    /// Multiple names can map to the same constructor (e.g. `"round_robin"` and
+    /// `"roundrobin"`). Names are normalized to lowercase for lookup.
+    pub fn register<F>(&self, name: &str, constructor: F)
+    where
+        F: Fn() -> Arc<dyn LoadBalancingPolicy> + Send + Sync + 'static,
+    {
+        self.registry
+            .write()
+            .insert(name.to_lowercase(), Box::new(constructor));
+    }
+
+    /// Create a policy by name (for dynamic loading / policy hints from workers).
+    ///
+    /// Name lookup is case-insensitive.
+    pub fn create_by_name(&self, name: &str) -> Option<Arc<dyn LoadBalancingPolicy>> {
+        let registry = self.registry.read();
+        registry.get(&name.to_lowercase()).map(|ctor| ctor())
+    }
+
+    /// Create a policy from a typed [`PolicyConfig`] enum.
+    ///
+    /// This handles config-specific parameters (thresholds, intervals, etc.)
+    /// that the simple name-based constructors don't support.
+    pub fn create_from_config(&self, config: &PolicyConfig) -> Arc<dyn LoadBalancingPolicy> {
         match config {
             PolicyConfig::Random => Arc::new(RandomPolicy::new()),
             PolicyConfig::RoundRobin => Arc::new(RoundRobinPolicy::new()),
@@ -34,8 +82,6 @@ impl PolicyFactory {
                 Arc::new(CacheAwarePolicy::with_config(config))
             }
             PolicyConfig::ConsistentHash { virtual_nodes: _ } => {
-                // Note: virtual_nodes parameter is available but not currently used
-                // The consistent hash policy uses a hardcoded value for now
                 Arc::new(ConsistentHashPolicy::new())
             }
             PolicyConfig::LMCacheAware {
@@ -48,7 +94,8 @@ impl PolicyFactory {
                 controller_api_key,
                 lmcache_worker_map,
             } => {
-                let fallback = PolicyFactory::create_by_name(fallback_policy)
+                let fallback = self
+                    .create_by_name(fallback_policy)
                     .unwrap_or_else(|| Arc::new(PowerOfTwoPolicy::new()));
                 let config = LMCacheAwareConfig {
                     controller_url: controller_url.clone(),
@@ -65,20 +112,37 @@ impl PolicyFactory {
         }
     }
 
-    /// Create a policy by name (for dynamic loading)
-    pub fn create_by_name(name: &str) -> Option<Arc<dyn LoadBalancingPolicy>> {
-        match name.to_lowercase().as_str() {
-            "random" => Some(Arc::new(RandomPolicy::new())),
-            "round_robin" | "roundrobin" => Some(Arc::new(RoundRobinPolicy::new())),
-            "power_of_two" | "poweroftwo" => Some(Arc::new(PowerOfTwoPolicy::new())),
-            "cache_aware" | "cacheaware" => Some(Arc::new(CacheAwarePolicy::new())),
-            "consistent_hash" | "consistenthash" => Some(Arc::new(ConsistentHashPolicy::new())),
-            "lmcache_aware" | "lmcacheaware" => {
-                Some(Arc::new(LMCacheAwarePolicy::with_defaults()))
-            }
-            _ => None,
-        }
+    /// List all registered policy names.
+    pub fn registered_names(&self) -> Vec<String> {
+        self.registry.read().keys().cloned().collect()
     }
+
+    fn register_builtins(&self) {
+        self.register("random", || Arc::new(RandomPolicy::new()));
+        self.register("round_robin", || Arc::new(RoundRobinPolicy::new()));
+        self.register("roundrobin", || Arc::new(RoundRobinPolicy::new()));
+        self.register("power_of_two", || Arc::new(PowerOfTwoPolicy::new()));
+        self.register("poweroftwo", || Arc::new(PowerOfTwoPolicy::new()));
+        self.register("cache_aware", || Arc::new(CacheAwarePolicy::new()));
+        self.register("cacheaware", || Arc::new(CacheAwarePolicy::new()));
+        self.register("consistent_hash", || Arc::new(ConsistentHashPolicy::new()));
+        self.register("consistenthash", || Arc::new(ConsistentHashPolicy::new()));
+        self.register("lmcache_aware", || {
+            Arc::new(LMCacheAwarePolicy::with_defaults())
+        });
+        self.register("lmcacheaware", || {
+            Arc::new(LMCacheAwarePolicy::with_defaults())
+        });
+    }
+}
+
+/// Global shared factory instance. Initialized once, used by PolicyRegistry
+/// and anywhere else that needs to create policies by name.
+static FACTORY: std::sync::LazyLock<PolicyFactory> = std::sync::LazyLock::new(PolicyFactory::new);
+
+/// Get a reference to the global policy factory.
+pub fn global_factory() -> &'static PolicyFactory {
+    &FACTORY
 }
 
 #[cfg(test)]
@@ -87,22 +151,20 @@ mod tests {
 
     #[test]
     fn test_create_from_config() {
-        // Test Random
-        let policy = PolicyFactory::create_from_config(&PolicyConfig::Random);
+        let factory = PolicyFactory::new();
+
+        let policy = factory.create_from_config(&PolicyConfig::Random);
         assert_eq!(policy.name(), "random");
 
-        // Test RoundRobin
-        let policy = PolicyFactory::create_from_config(&PolicyConfig::RoundRobin);
+        let policy = factory.create_from_config(&PolicyConfig::RoundRobin);
         assert_eq!(policy.name(), "round_robin");
 
-        // Test PowerOfTwo
-        let policy = PolicyFactory::create_from_config(&PolicyConfig::PowerOfTwo {
+        let policy = factory.create_from_config(&PolicyConfig::PowerOfTwo {
             load_check_interval_secs: 60,
         });
         assert_eq!(policy.name(), "power_of_two");
 
-        // Test CacheAware
-        let policy = PolicyFactory::create_from_config(&PolicyConfig::CacheAware {
+        let policy = factory.create_from_config(&PolicyConfig::CacheAware {
             cache_threshold: 0.7,
             balance_abs_threshold: 10,
             balance_rel_threshold: 1.5,
@@ -111,24 +173,47 @@ mod tests {
         });
         assert_eq!(policy.name(), "cache_aware");
 
-        // Test ConsistentHash
         let policy =
-            PolicyFactory::create_from_config(&PolicyConfig::ConsistentHash { virtual_nodes: 160 });
+            factory.create_from_config(&PolicyConfig::ConsistentHash { virtual_nodes: 160 });
         assert_eq!(policy.name(), "consistent_hash");
     }
 
     #[test]
     fn test_create_by_name() {
-        assert!(PolicyFactory::create_by_name("random").is_some());
-        assert!(PolicyFactory::create_by_name("RANDOM").is_some());
-        assert!(PolicyFactory::create_by_name("round_robin").is_some());
-        assert!(PolicyFactory::create_by_name("RoundRobin").is_some());
-        assert!(PolicyFactory::create_by_name("power_of_two").is_some());
-        assert!(PolicyFactory::create_by_name("PowerOfTwo").is_some());
-        assert!(PolicyFactory::create_by_name("cache_aware").is_some());
-        assert!(PolicyFactory::create_by_name("CacheAware").is_some());
-        assert!(PolicyFactory::create_by_name("consistent_hash").is_some());
-        assert!(PolicyFactory::create_by_name("ConsistentHash").is_some());
-        assert!(PolicyFactory::create_by_name("unknown").is_none());
+        let factory = PolicyFactory::new();
+
+        assert!(factory.create_by_name("random").is_some());
+        assert!(factory.create_by_name("RANDOM").is_some());
+        assert!(factory.create_by_name("round_robin").is_some());
+        assert!(factory.create_by_name("RoundRobin").is_some());
+        assert!(factory.create_by_name("power_of_two").is_some());
+        assert!(factory.create_by_name("PowerOfTwo").is_some());
+        assert!(factory.create_by_name("cache_aware").is_some());
+        assert!(factory.create_by_name("CacheAware").is_some());
+        assert!(factory.create_by_name("consistent_hash").is_some());
+        assert!(factory.create_by_name("ConsistentHash").is_some());
+        assert!(factory.create_by_name("lmcache_aware").is_some());
+        assert!(factory.create_by_name("unknown").is_none());
+    }
+
+    #[test]
+    fn test_custom_registration() {
+        let factory = PolicyFactory::new();
+
+        // Register a custom policy (reusing RandomPolicy as a stand-in)
+        factory.register("my_custom_policy", || Arc::new(RandomPolicy::new()));
+
+        let policy = factory.create_by_name("my_custom_policy");
+        assert!(policy.is_some());
+        assert_eq!(policy.unwrap().name(), "random");
+    }
+
+    #[test]
+    fn test_registered_names() {
+        let factory = PolicyFactory::new();
+        let names = factory.registered_names();
+        assert!(names.contains(&"random".to_string()));
+        assert!(names.contains(&"round_robin".to_string()));
+        assert!(names.contains(&"cache_aware".to_string()));
     }
 }

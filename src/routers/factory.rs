@@ -8,7 +8,7 @@ use super::{
     RouterTrait,
 };
 use crate::config::{ConnectionMode, PolicyConfig, RoutingMode};
-use crate::policies::PolicyFactory;
+use crate::policies::global_factory;
 use crate::server::AppContext;
 use std::sync::Arc;
 
@@ -131,9 +131,9 @@ impl RouterFactory {
     ) -> Result<Box<dyn RouterTrait>, String> {
         // Initialize policies in PolicyRegistry - use specific policies if provided, otherwise fall back to main policy
         let prefill_policy =
-            PolicyFactory::create_from_config(prefill_policy_config.unwrap_or(main_policy_config));
+            global_factory().create_from_config(prefill_policy_config.unwrap_or(main_policy_config));
         let decode_policy =
-            PolicyFactory::create_from_config(decode_policy_config.unwrap_or(main_policy_config));
+            global_factory().create_from_config(decode_policy_config.unwrap_or(main_policy_config));
 
         // Set the prefill and decode policies in the registry
         ctx.policy_registry.set_prefill_policy(prefill_policy);
@@ -157,9 +157,9 @@ impl RouterFactory {
     ) -> Result<Box<dyn RouterTrait>, String> {
         // Initialize policies in PolicyRegistry - use specific policies if provided, otherwise fall back to main policy
         let prefill_policy =
-            PolicyFactory::create_from_config(prefill_policy_config.unwrap_or(main_policy_config));
+            global_factory().create_from_config(prefill_policy_config.unwrap_or(main_policy_config));
         let decode_policy =
-            PolicyFactory::create_from_config(decode_policy_config.unwrap_or(main_policy_config));
+            global_factory().create_from_config(decode_policy_config.unwrap_or(main_policy_config));
 
         // Set the prefill and decode policies in the registry
         ctx.policy_registry.set_prefill_policy(prefill_policy);
@@ -201,7 +201,7 @@ impl RouterFactory {
         use super::grpc::router::GrpcRouter;
 
         // Create policy
-        let policy = PolicyFactory::create_from_config(policy_config);
+        let policy = global_factory().create_from_config(policy_config);
 
         // Create gRPC router with context
         let router = GrpcRouter::new(worker_urls.to_vec(), policy, ctx).await?;
@@ -222,9 +222,9 @@ impl RouterFactory {
 
         // Create policies - use specific policies if provided, otherwise fall back to main policy
         let prefill_policy =
-            PolicyFactory::create_from_config(prefill_policy_config.unwrap_or(main_policy_config));
+            global_factory().create_from_config(prefill_policy_config.unwrap_or(main_policy_config));
         let decode_policy =
-            PolicyFactory::create_from_config(decode_policy_config.unwrap_or(main_policy_config));
+            global_factory().create_from_config(decode_policy_config.unwrap_or(main_policy_config));
 
         // Create gRPC PD router with context
         let router = GrpcPDRouter::new(

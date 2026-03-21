@@ -20,7 +20,7 @@ pub mod semantic_cluster;
 
 pub use cache_aware::CacheAwarePolicy;
 pub use consistent_hash::ConsistentHashPolicy;
-pub use factory::PolicyFactory;
+pub use factory::{global_factory, PolicyFactory};
 pub use lmcache_aware::{LMCacheAwareConfig, LMCacheAwarePolicy};
 pub use power_of_two::PowerOfTwoPolicy;
 pub use random::RandomPolicy;
