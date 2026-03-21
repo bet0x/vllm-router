@@ -5,6 +5,17 @@ Upstream: [vllm-project/router](https://github.com/vllm-project/router) | Fork: 
 
 ---
 
+## [0.7.2] — 2026-03-20
+
+### Added
+- **End-to-end OTel child spans** — 7 new spans in the routing pipeline: `hooks.pipeline`, `hook.execute`, `cache.exact_lookup`, `cache.semantic_lookup`, `embedding.fetch`, `routing.cluster`, `worker.forward`. Each with typed attributes (outcome, status, worker, policy, duration). Guarded by `is_otel_enabled()` for zero overhead when disabled.
+- **Span name contract** — `otel_trace::SPAN_*` constants and `ALL_SPAN_NAMES` slice define stable span names that external tooling can depend on.
+- **Hook contract tests** — 18 tests covering every hook outcome: allow, reject (403/400/pass), transform (with/without body, disabled), timeout, non-200, invalid JSON, connection refused, unknown action, multi-hook chain ordering.
+- **Decision log schema v2** — `DECISION_SCHEMA_VERSION = 2` with `schema_version` and `hooks_ran` fields. Backward-compatible: v1 records without `schema_version` deserialize with default `1`. `REQUIRED_FIELDS` and `ALL_FIELDS` constants for external validation. 10 contract tests.
+- **Explainability header contract** — `HEADER_*` constants and `ALL_EXPLAINABILITY_HEADERS` slice. 6 contract tests verifying header injection for policy, cache-hit, cluster, and minimal decision scenarios.
+
+---
+
 ## [0.7.1] — 2026-03-20
 
 ### Added

@@ -28,9 +28,38 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio_stream::wrappers::UnboundedReceiverStream;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, field::Empty, info, warn};
 
 // ── Routing decision headers ────────────────────────────────────────────────
+//
+// These header names are part of the public contract when
+// `expose_routing_headers` is enabled. Changing a name is a breaking change.
+
+/// Worker URL that handled the request.
+pub const HEADER_WORKER: &str = "x-vllm-router-worker";
+/// How the worker was selected: `policy`, `cluster`, `lmcache-prefix`, `cache-hit`, `semantic-hit`.
+pub const HEADER_METHOD: &str = "x-vllm-router-method";
+/// Load-balancing policy name (only set when method=policy).
+pub const HEADER_POLICY: &str = "x-vllm-router-policy";
+/// Semantic cluster that matched (only set when method=cluster).
+pub const HEADER_CLUSTER: &str = "x-vllm-router-cluster";
+/// Resolved model name.
+pub const HEADER_MODEL: &str = "x-vllm-router-model";
+/// Cache status: `exact-hit`, `semantic-hit`, or `miss`.
+pub const HEADER_CACHE_STATUS: &str = "x-vllm-router-cache-status";
+/// Comma-separated list of hooks that executed.
+pub const HEADER_HOOKS: &str = "x-vllm-router-hooks";
+
+/// All explainability header names, for use in contract tests.
+pub const ALL_EXPLAINABILITY_HEADERS: &[&str] = &[
+    HEADER_WORKER,
+    HEADER_METHOD,
+    HEADER_POLICY,
+    HEADER_CLUSTER,
+    HEADER_MODEL,
+    HEADER_CACHE_STATUS,
+    HEADER_HOOKS,
+];
 
 /// Metadata accumulated during the routing pipeline, injected as response
 /// headers when `expose_routing_headers` is enabled.
@@ -55,6 +84,7 @@ impl RoutingDecision {
         duration_ms: u64,
     ) -> crate::admin::DecisionRecord {
         crate::admin::DecisionRecord {
+            schema_version: crate::admin::decision_log::DECISION_SCHEMA_VERSION,
             timestamp: crate::admin::decision_log::now_iso8601(),
             request_id: request_id.map(|s| s.to_string()),
             route: route.to_string(),
@@ -66,6 +96,7 @@ impl RoutingDecision {
             cache_status: self.cache_status.map(|s| s.to_string()),
             status,
             duration_ms,
+            hooks_ran: self.hooks_ran.clone(),
             request_text: self.request_text.clone(),
         }
     }
@@ -74,33 +105,33 @@ impl RoutingDecision {
         let h = resp.headers_mut();
         if let Some(ref w) = self.worker {
             if let Ok(v) = HeaderValue::from_str(w) {
-                h.insert("x-vllm-router-worker", v);
+                h.insert(HEADER_WORKER, v);
             }
         }
         if let Some(m) = self.method {
-            h.insert("x-vllm-router-method", HeaderValue::from_static(m));
+            h.insert(HEADER_METHOD, HeaderValue::from_static(m));
         }
         if let Some(ref p) = self.policy {
             if let Ok(v) = HeaderValue::from_str(p) {
-                h.insert("x-vllm-router-policy", v);
+                h.insert(HEADER_POLICY, v);
             }
         }
         if let Some(ref c) = self.cluster {
             if let Ok(v) = HeaderValue::from_str(c) {
-                h.insert("x-vllm-router-cluster", v);
+                h.insert(HEADER_CLUSTER, v);
             }
         }
         if let Some(ref model) = self.model {
             if let Ok(v) = HeaderValue::from_str(model) {
-                h.insert("x-vllm-router-model", v);
+                h.insert(HEADER_MODEL, v);
             }
         }
         if let Some(cs) = self.cache_status {
-            h.insert("x-vllm-router-cache-status", HeaderValue::from_static(cs));
+            h.insert(HEADER_CACHE_STATUS, HeaderValue::from_static(cs));
         }
         if !self.hooks_ran.is_empty() {
             if let Ok(v) = HeaderValue::from_str(&self.hooks_ran.join(",")) {
-                h.insert("x-vllm-router-hooks", v);
+                h.insert(HEADER_HOOKS, v);
             }
         }
     }
@@ -1221,6 +1252,17 @@ impl Router {
         decision.model = model_id.map(|s| s.to_string());
 
         // Execute pre-routing hooks (safety checks, PII masking, etc.).
+        let _hooks_span = if crate::otel_trace::is_otel_enabled() && !self.pre_routing_hooks.is_empty() {
+            Some(tracing::info_span!(
+                target: "otel_trace",
+                "hooks.pipeline",
+                otel.name = "pre-routing hooks",
+                hooks.count = self.pre_routing_hooks.len(),
+                hooks.outcome = Empty,
+            ))
+        } else {
+            None
+        };
         let (typed_req, hooks_ran) = if !self.pre_routing_hooks.is_empty() {
             let body_json = match serde_json::to_value(typed_req) {
                 Ok(j) => j,
@@ -1231,6 +1273,7 @@ impl Router {
             };
             match crate::hooks::execute(&self.pre_routing_hooks, &self.client, body_json).await {
                 crate::hooks::HookOutcome::Allow { body, hooks_ran } => {
+                    if let Some(ref s) = _hooks_span { s.record("hooks.outcome", "allow"); }
                     // Re-deserialize in case a hook transformed the body
                     match serde_json::from_value::<T>(body) {
                         Ok(new_req) => (std::borrow::Cow::Owned(new_req), hooks_ran),
@@ -1241,20 +1284,35 @@ impl Router {
                         }
                     }
                 }
-                crate::hooks::HookOutcome::Reject(resp) => return resp,
+                crate::hooks::HookOutcome::Reject(resp) => {
+                    if let Some(ref s) = _hooks_span { s.record("hooks.outcome", "reject"); }
+                    return resp;
+                }
             }
         } else {
             (std::borrow::Cow::Borrowed(typed_req), Vec::new())
         };
         let typed_req = typed_req.as_ref();
         decision.hooks_ran = hooks_ran;
+        drop(_hooks_span);
 
         if !is_stream {
             if let Ok(json) = serde_json::to_value(typed_req) {
                 let cache_key = crate::cache::ResponseCache::compute_key(&json);
 
                 // 1. Exact-match cache hit — return immediately without touching a worker
+                let _cache_span = if crate::otel_trace::is_otel_enabled() {
+                    Some(tracing::info_span!(
+                        target: "otel_trace",
+                        "cache.exact_lookup",
+                        otel.name = "exact-match cache lookup",
+                        cache.status = Empty,
+                    ))
+                } else {
+                    None
+                };
                 if let Some((cached_body, ct)) = self.response_cache.get(cache_key).await {
+                    if let Some(ref s) = _cache_span { s.record("cache.status", "hit"); }
                     let mut resp = Response::new(axum::body::Body::from(cached_body));
                     *resp.status_mut() = StatusCode::OK;
                     if let Some(ct_str) = ct {
@@ -1268,22 +1326,48 @@ impl Router {
                     self.decision_log.push(decision.to_record(None, route, 200, 0));
                     return resp;
                 }
+                if let Some(ref s) = _cache_span { s.record("cache.status", "miss"); }
+                drop(_cache_span);
 
                 // 2. Compute embedding when semantic cache or cluster routing is active.
                 // The same vector is reused for both purposes to avoid double-fetching.
                 let mut query_embedding: Option<Vec<f32>> = None;
                 if self.semantic_cache.is_some() || self.semantic_cluster.is_some() {
+                    let _emb_span = if crate::otel_trace::is_otel_enabled() {
+                        Some(tracing::info_span!(
+                            target: "otel_trace",
+                            "embedding.fetch",
+                            otel.name = "fetch embedding",
+                            embedding.success = Empty,
+                        ))
+                    } else {
+                        None
+                    };
                     let text = Self::extract_request_text(&json);
                     debug!(text_len = text.len(), has_cluster = self.semantic_cluster.is_some(), "fetching embedding for routing");
                     query_embedding = self.get_embedding(&text).await;
+                    if let Some(ref s) = _emb_span {
+                        s.record("embedding.success", query_embedding.is_some());
+                    }
                     debug!(got_embedding = query_embedding.is_some(), "embedding fetch done");
                 }
 
                 // 2a. Semantic similarity cache lookup (T-12).
+                let _sem_span = if crate::otel_trace::is_otel_enabled() && query_embedding.is_some() && self.semantic_cache.is_some() {
+                    Some(tracing::info_span!(
+                        target: "otel_trace",
+                        "cache.semantic_lookup",
+                        otel.name = "semantic cache lookup",
+                        cache.status = Empty,
+                    ))
+                } else {
+                    None
+                };
                 if let (Some(emb), Some(sem_cache)) =
                     (query_embedding.as_ref(), &self.semantic_cache)
                 {
                     if let Some((cached_body, ct)) = sem_cache.find_similar(emb).await {
+                        if let Some(ref s) = _sem_span { s.record("cache.status", "hit"); }
                         debug!("Semantic cache hit (similarity ≥ {})", sem_cache.threshold());
                         let mut resp = Response::new(axum::body::Body::from(cached_body));
                         *resp.status_mut() = StatusCode::OK;
@@ -1300,10 +1384,23 @@ impl Router {
                     }
                 }
 
+                if let Some(ref s) = _sem_span { s.record("cache.status", "miss"); }
+                drop(_sem_span);
                 decision.cache_status = Some("miss");
 
                 // 2b. Semantic cluster routing — pick the best-matching cluster worker.
                 // Returns (worker, cluster_name) so the cluster name can be logged + metered.
+                let _cluster_span = if crate::otel_trace::is_otel_enabled() && query_embedding.is_some() && self.semantic_cluster.is_some() {
+                    Some(tracing::info_span!(
+                        target: "otel_trace",
+                        "routing.cluster",
+                        otel.name = "semantic cluster routing",
+                        routing.cluster = Empty,
+                        routing.worker = Empty,
+                    ))
+                } else {
+                    None
+                };
                 let cluster_hit: Option<(Arc<dyn Worker>, &str)> =
                     if let (Some(emb), Some(sc)) =
                         (query_embedding.as_ref(), &self.semantic_cluster)
@@ -1321,8 +1418,12 @@ impl Router {
                         };
                         let available: Vec<Arc<dyn Worker>> =
                             all.iter().filter(|w| w.is_available()).cloned().collect();
-                        sc.route(emb, &available).inspect(|(w, cluster_name)| {
-                            debug!(cluster = cluster_name, worker = w.url(), "semantic cluster selected");
+                        sc.route(emb, &available).inspect(|(w, cname)| {
+                            debug!(cluster = cname, worker = w.url(), "semantic cluster selected");
+                            if let Some(ref s) = _cluster_span {
+                                s.record("routing.cluster", *cname);
+                                s.record("routing.worker", w.url());
+                            }
                         })
                     } else {
                         None
@@ -1410,6 +1511,22 @@ impl Router {
         // Accumulates routing metadata for explainability headers.
         decision: &mut RoutingDecision,
     ) -> Response {
+        let _fwd_span = if crate::otel_trace::is_otel_enabled() {
+            Some(tracing::info_span!(
+                target: "otel_trace",
+                "worker.forward",
+                otel.name = %format_args!("forward {}", route),
+                routing.route = route,
+                routing.model = model_id.unwrap_or(""),
+                routing.method = Empty,
+                routing.policy = Empty,
+                routing.worker = Empty,
+                http.response.status_code = Empty,
+                worker.duration_ms = Empty,
+            ))
+        } else {
+            None
+        };
         let start = Instant::now();
         let is_stream = typed_req.is_stream();
         let text = typed_req.extract_text_for_routing();
@@ -1446,6 +1563,11 @@ impl Router {
                 };
                 decision.policy = Some(policy.name().to_string());
             }
+        }
+        // Record routing decision on the OTel span.
+        if let Some(ref s) = _fwd_span {
+            if let Some(m) = decision.method { s.record("routing.method", m); }
+            if let Some(ref p) = decision.policy { s.record("routing.policy", p.as_str()); }
         }
 
         // Shared slot so the retry closure can report the final worker URL.
@@ -1592,6 +1714,13 @@ impl Router {
 
         let duration = start.elapsed();
         let status = response.status();
+
+        // Record final outcome on the OTel span.
+        if let Some(ref s) = _fwd_span {
+            if let Some(ref w) = decision.worker { s.record("routing.worker", w.as_str()); }
+            s.record("http.response.status_code", status.as_u16());
+            s.record("worker.duration_ms", duration.as_millis() as u64);
+        }
         if status.is_success() {
             RouterMetrics::record_request(route);
             RouterMetrics::record_generate_duration(duration);
@@ -3351,5 +3480,108 @@ mod tests {
         );
 
         health_checker.shutdown().await;
+    }
+
+    // ── Explainability header contract tests ──────────────────────────────
+
+    #[test]
+    fn header_constants_are_valid_http_names() {
+        for name in ALL_EXPLAINABILITY_HEADERS {
+            assert!(
+                axum::http::HeaderName::from_bytes(name.as_bytes()).is_ok(),
+                "{name} is not a valid HTTP header name"
+            );
+        }
+    }
+
+    #[test]
+    fn header_constants_all_start_with_x_vllm_router() {
+        for name in ALL_EXPLAINABILITY_HEADERS {
+            assert!(
+                name.starts_with("x-vllm-router-"),
+                "header {name} must start with x-vllm-router-"
+            );
+        }
+    }
+
+    #[test]
+    fn inject_headers_policy_route() {
+        let decision = RoutingDecision {
+            worker: Some("http://w1:8000".to_string()),
+            method: Some("policy"),
+            policy: Some("round_robin".to_string()),
+            cluster: None,
+            model: Some("llama-3".to_string()),
+            cache_status: Some("miss"),
+            hooks_ran: vec!["safety".to_string()],
+            request_text: None,
+        };
+        let mut resp = Response::new(Body::empty());
+        decision.inject_headers(&mut resp);
+        let h = resp.headers();
+        assert_eq!(h.get(HEADER_WORKER).unwrap(), "http://w1:8000");
+        assert_eq!(h.get(HEADER_METHOD).unwrap(), "policy");
+        assert_eq!(h.get(HEADER_POLICY).unwrap(), "round_robin");
+        assert!(h.get(HEADER_CLUSTER).is_none(), "cluster should be absent");
+        assert_eq!(h.get(HEADER_MODEL).unwrap(), "llama-3");
+        assert_eq!(h.get(HEADER_CACHE_STATUS).unwrap(), "miss");
+        assert_eq!(h.get(HEADER_HOOKS).unwrap(), "safety");
+    }
+
+    #[test]
+    fn inject_headers_cache_hit() {
+        let decision = RoutingDecision {
+            worker: None,
+            method: Some("cache-hit"),
+            policy: None,
+            cluster: None,
+            model: Some("gpt-4".to_string()),
+            cache_status: Some("exact-hit"),
+            hooks_ran: vec![],
+            request_text: None,
+        };
+        let mut resp = Response::new(Body::empty());
+        decision.inject_headers(&mut resp);
+        let h = resp.headers();
+        assert!(h.get(HEADER_WORKER).is_none(), "no worker on cache hit");
+        assert_eq!(h.get(HEADER_METHOD).unwrap(), "cache-hit");
+        assert!(h.get(HEADER_POLICY).is_none());
+        assert_eq!(h.get(HEADER_CACHE_STATUS).unwrap(), "exact-hit");
+        assert!(h.get(HEADER_HOOKS).is_none(), "no hooks header when empty");
+    }
+
+    #[test]
+    fn inject_headers_cluster_route() {
+        let decision = RoutingDecision {
+            worker: Some("http://w-math:8000".to_string()),
+            method: Some("cluster"),
+            policy: None,
+            cluster: Some("math".to_string()),
+            model: None,
+            cache_status: Some("miss"),
+            hooks_ran: vec!["pii".to_string(), "safety:timeout".to_string()],
+            request_text: None,
+        };
+        let mut resp = Response::new(Body::empty());
+        decision.inject_headers(&mut resp);
+        let h = resp.headers();
+        assert_eq!(h.get(HEADER_METHOD).unwrap(), "cluster");
+        assert_eq!(h.get(HEADER_CLUSTER).unwrap(), "math");
+        assert_eq!(h.get(HEADER_HOOKS).unwrap(), "pii,safety:timeout");
+        assert!(h.get(HEADER_MODEL).is_none());
+    }
+
+    #[test]
+    fn inject_headers_minimal_decision() {
+        let decision = RoutingDecision::default();
+        let mut resp = Response::new(Body::empty());
+        decision.inject_headers(&mut resp);
+        // Default decision has nothing set — no headers should be injected
+        for name in ALL_EXPLAINABILITY_HEADERS {
+            assert!(
+                resp.headers().get(*name).is_none(),
+                "header {name} should not appear for empty decision"
+            );
+        }
     }
 }

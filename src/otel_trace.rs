@@ -29,6 +29,27 @@ use tracing_subscriber::{
 
 use crate::config::TraceConfig;
 
+// ── Span name contract ──────────────────────────────────────────────────────
+// These constants define the stable span names emitted by the router pipeline.
+// External tooling (dashboards, alerts, tests) may depend on them.
+// Changing a name is a breaking contract change — add a new constant and
+// deprecate the old one instead.
+
+/// Span emitted for each pre-routing hook invocation.
+pub const SPAN_HOOK_EXECUTE: &str = "hook.execute";
+/// Span emitted around the full pre-routing hook pipeline.
+pub const SPAN_HOOKS_PIPELINE: &str = "hooks.pipeline";
+/// Span emitted for exact-match response cache lookup.
+pub const SPAN_CACHE_EXACT: &str = "cache.exact_lookup";
+/// Span emitted for semantic similarity cache lookup.
+pub const SPAN_CACHE_SEMANTIC: &str = "cache.semantic_lookup";
+/// Span emitted when fetching an embedding from the external endpoint.
+pub const SPAN_EMBEDDING_FETCH: &str = "embedding.fetch";
+/// Span emitted for semantic cluster routing.
+pub const SPAN_ROUTING_CLUSTER: &str = "routing.cluster";
+/// Span emitted when forwarding a request to a backend worker.
+pub const SPAN_WORKER_FORWARD: &str = "worker.forward";
+
 /// Whether OpenTelemetry tracing is enabled.
 ///
 /// This flag guards runtime code paths (make_span parent extraction,
@@ -235,6 +256,17 @@ pub fn is_excluded_http_path(path: &str) -> bool {
         .get()
         .is_some_and(|paths| paths.iter().any(|excluded| excluded == path))
 }
+
+/// All span names emitted by the routing pipeline, for use in contract tests.
+pub const ALL_SPAN_NAMES: &[&str] = &[
+    SPAN_HOOK_EXECUTE,
+    SPAN_HOOKS_PIPELINE,
+    SPAN_CACHE_EXACT,
+    SPAN_CACHE_SEMANTIC,
+    SPAN_EMBEDDING_FETCH,
+    SPAN_ROUTING_CLUSTER,
+    SPAN_WORKER_FORWARD,
+];
 
 pub fn shutdown_otel() {
     if ENABLED.load(Ordering::Acquire) {
