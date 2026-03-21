@@ -68,6 +68,10 @@ impl TestContext {
             cache: None,
             semantic_cache: None,
             semantic_cluster: None,
+            expose_routing_headers: false,
+            model_rules: Vec::new(),
+            pre_routing_hooks: Vec::new(),
+            decision_log: None,
             tokenizer_model_map: std::collections::HashMap::new(),
         };
 
@@ -1413,6 +1417,10 @@ mod error_tests {
             cache: None,
             semantic_cache: None,
             semantic_cluster: None,
+            expose_routing_headers: false,
+            model_rules: Vec::new(),
+            pre_routing_hooks: Vec::new(),
+            decision_log: None,
             tokenizer_model_map: std::collections::HashMap::new(),
         };
 
@@ -1782,6 +1790,10 @@ mod pd_mode_tests {
             cache: None,
             semantic_cache: None,
             semantic_cluster: None,
+            expose_routing_headers: false,
+            model_rules: Vec::new(),
+            pre_routing_hooks: Vec::new(),
+            decision_log: None,
             tokenizer_model_map: std::collections::HashMap::new(),
         };
 
@@ -1955,6 +1967,10 @@ mod request_id_tests {
             cache: None,
             semantic_cache: None,
             semantic_cluster: None,
+            expose_routing_headers: false,
+            model_rules: Vec::new(),
+            pre_routing_hooks: Vec::new(),
+            decision_log: None,
             tokenizer_model_map: std::collections::HashMap::new(),
         };
 

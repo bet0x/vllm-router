@@ -52,6 +52,11 @@ tracing-subscriber = { version = "0.3", features = [
 ] }
 tracing-log = "0.2"
 tracing-appender = "0.2.3"
+opentelemetry = "0.27"
+opentelemetry_sdk = { version = "0.27", features = ["trace", "rt-tokio"] }
+opentelemetry-otlp = { version = "0.27", features = ["trace", "grpc-tonic"] }
+tracing-opentelemetry = "0.28"
+opentelemetry-http = "0.27"
 chrono = "0.4"
 kube = { version = "1.1.0", features = ["runtime", "derive"] }
 k8s-openapi = { version = "0.25.0", features = ["v1_33"] }
@@ -102,6 +107,7 @@ http-body-util = "0.1"
 portpicker = "0.1"
 tempfile = "3.8"
 lazy_static = "1.4"
+opentelemetry_sdk = { version = "0.27", features = ["testing"] }
 
 [[bench]]
 name = "request_processing"
@@ -112,6 +118,11 @@ path = "benches/request_processing.rs"
 name = "tokenizer_benchmark"
 harness = false
 path = "benches/tokenizer_benchmark.rs"
+
+[[bench]]
+name = "otel_disabled_path"
+harness = false
+path = "benches/otel_disabled_path.rs"
 
 [profile.release]
 lto = "thin"

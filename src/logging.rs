@@ -2,11 +2,12 @@ use std::path::PathBuf;
 use tracing::Level;
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
-use tracing_log::LogTracer;
 use tracing_subscriber::fmt::time::ChronoUtc;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{EnvFilter, Layer};
+
+use crate::config::TraceConfig;
 
 /// Configuration for the logging system
 #[derive(Debug, Clone)]
@@ -51,15 +52,16 @@ pub struct LogGuard {
 ///
 /// # Arguments
 /// * `config` - Configuration for the logging system
+/// * `otel_layer_config` - Optional OpenTelemetry trace config. When `Some`,
+///   the OTel tracing layer is added to the subscriber and activated.
 ///
 /// # Returns
 /// A LogGuard that must be kept alive for the duration of the program
-///
-/// # Panics
-/// Will not panic, as initialization errors are handled gracefully
-pub fn init_logging(config: LoggingConfig) -> LogGuard {
-    // Forward logs to tracing - ignore errors to allow for multiple initialization
-    let _ = LogTracer::init();
+pub fn init_logging(config: LoggingConfig, otel_layer_config: Option<TraceConfig>) -> LogGuard {
+    // Note: Do NOT call LogTracer::init() here. The tracing_subscriber
+    // try_init() method handles LogTracer initialization internally (when the
+    // "tracing-log" feature is enabled). Calling it beforehand causes
+    // try_init() to fail because log::set_logger() can only be called once.
 
     // Convert log level to filter string
     let level_filter = match config.level {
@@ -91,6 +93,19 @@ pub fn init_logging(config: LoggingConfig) -> LogGuard {
 
         EnvFilter::new(filter_string)
     });
+
+    // When OTel tracing is enabled, ensure the OTel span target passes through
+    // the global EnvFilter regardless of log level. Without this, --log-level warn
+    // silently suppresses all info-level OTel spans.
+    let env_filter = if otel_layer_config.is_some() {
+        env_filter.add_directive(
+            "otel_trace=trace"
+                .parse()
+                .expect("valid EnvFilter directive"),
+        )
+    } else {
+        env_filter
+    };
 
     // Setup stdout/stderr layer
     let mut layers = Vec::new();
@@ -149,12 +164,35 @@ pub fn init_logging(config: LoggingConfig) -> LogGuard {
         layers.push(file_layer);
     }
 
+    // Add OTel tracing layer if configured
+    let mut prepared_otel = None;
+    if let Some(trace_config) = otel_layer_config {
+        match crate::otel_trace::prepare_otel(&trace_config) {
+            Ok(prepared) => {
+                layers.push(prepared.layer());
+                prepared_otel = Some(prepared);
+            }
+            Err(e) => {
+                eprintln!("Failed to initialize OpenTelemetry: {e}");
+            }
+        }
+    }
+
     // Initialize the subscriber with all layers
     // Use try_init to handle errors gracefully in case another subscriber is already set
-    let _ = tracing_subscriber::registry()
+    let subscriber_installed = tracing_subscriber::registry()
         .with(env_filter)
         .with(layers)
-        .try_init();
+        .try_init()
+        .is_ok();
+
+    // Only activate OTel (set global propagator + provider, flip ENABLED)
+    // after both the layer and subscriber are live
+    if let Some(prepared) = prepared_otel {
+        if subscriber_installed {
+            crate::otel_trace::activate_otel(prepared);
+        }
+    }
 
     // Return the guard to keep the file appender worker thread alive
     LogGuard {

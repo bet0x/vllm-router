@@ -65,3 +65,8 @@ health_check:
 # decision_log:
 #   export_path: "/var/log/vllm-router/decisions.jsonl"
 #   export_interval_secs: 10
+
+# OpenTelemetry distributed tracing (default: disabled)
+# trace_config:
+#   otlp_traces_endpoint: "localhost:4317"
+#   sampling_ratio: 1.0

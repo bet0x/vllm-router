@@ -4,7 +4,7 @@ use std::sync::Arc;
 use vllm_router_rs::{
     config::RouterConfig,
     routers::RouterTrait,
-    server::{build_app, AppContext, AppState},
+    server::{build_app, build_app_with_request_tracing, AppContext, AppState},
 };
 
 /// Create a test Axum application using the actual server's build_app function
@@ -33,6 +33,7 @@ pub fn create_test_app(
         context: app_context,
         concurrency_queue_tx: None,
         router_manager: None,
+        start_time: std::time::Instant::now(),
     });
 
     // Configure request ID headers (use defaults if not specified)
@@ -52,5 +53,52 @@ pub fn create_test_app(
         request_id_headers,
         router_config.cors_allowed_origins.clone(),
         true, // enable_transparent_proxy
+    )
+}
+
+/// Create a test app with explicit request-tracing toggle (for OTel tests).
+#[allow(dead_code)]
+pub fn create_test_app_with_tracing(
+    router: Arc<dyn RouterTrait>,
+    client: Client,
+    router_config: &RouterConfig,
+    enable_request_tracing: bool,
+) -> Router {
+    let app_context = Arc::new(
+        AppContext::new(
+            router_config.clone(),
+            client,
+            router_config.max_concurrent_requests,
+            router_config.rate_limit_tokens_per_second,
+            router_config.api_key_validation_urls.clone(),
+            None,
+        )
+        .expect("Failed to create AppContext in test"),
+    );
+
+    let app_state = Arc::new(AppState {
+        router,
+        context: app_context,
+        concurrency_queue_tx: None,
+        router_manager: None,
+        start_time: std::time::Instant::now(),
+    });
+
+    let request_id_headers = router_config.request_id_headers.clone().unwrap_or_else(|| {
+        vec![
+            "x-request-id".to_string(),
+            "x-correlation-id".to_string(),
+            "x-trace-id".to_string(),
+            "request-id".to_string(),
+        ]
+    });
+
+    build_app_with_request_tracing(
+        app_state,
+        router_config.max_payload_size,
+        request_id_headers,
+        router_config.cors_allowed_origins.clone(),
+        true,
+        enable_request_tracing,
     )
 }

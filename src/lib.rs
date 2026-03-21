@@ -11,6 +11,8 @@ pub mod grpc;
 pub mod metrics;
 pub mod middleware;
 pub mod model_rules;
+pub mod otel_http;
+pub mod otel_trace;
 pub mod policies;
 pub mod replay;
 pub mod protocols;

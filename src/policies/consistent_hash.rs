@@ -414,8 +414,8 @@ impl ConsistentHashPolicy {
         "x-session-id",
         "x-user-id",
         "x-tenant-id",
+        "x-correlation-id", // per-session — check before per-request
         "x-request-id",
-        "x-correlation-id",
         "x-trace-id",
     ];
 
@@ -477,7 +477,7 @@ impl ConsistentHashPolicy {
     /// Extract hash key with priority: HTTP headers > body fields > request content hash
     ///
     /// Priority order:
-    /// 1. HTTP Headers: x-session-id, x-user-id, x-tenant-id, x-request-id, x-correlation-id, x-trace-id
+    /// 1. HTTP Headers: x-session-id, x-user-id, x-tenant-id, x-correlation-id, x-request-id, x-trace-id
     /// 2. Body: session_params.session_id
     /// 3. Body: user field (OpenAI format)
     /// 4. Body: session_id (legacy)

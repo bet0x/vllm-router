@@ -871,3 +871,48 @@ impl Default for MockWorkerConfig {
         }
     }
 }
+
+// --- Request header capture for verifying router behavior (e.g., OTel trace context) ---
+
+/// A captured request with headers and path
+#[derive(Debug, Clone)]
+pub struct CapturedRequest {
+    pub path: String,
+    pub headers: HashMap<String, String>,
+}
+
+static REQ_CAPTURE_STORE: OnceLock<Mutex<HashMap<u16, Vec<CapturedRequest>>>> = OnceLock::new();
+
+fn get_capture_store() -> &'static Mutex<HashMap<u16, Vec<CapturedRequest>>> {
+    REQ_CAPTURE_STORE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Record a request for a given worker port
+pub fn capture_request(port: u16, path: &str, headers: &axum::http::HeaderMap) {
+    let captured = CapturedRequest {
+        path: path.to_string(),
+        headers: headers
+            .iter()
+            .filter_map(|(name, value)| {
+                value
+                    .to_str()
+                    .ok()
+                    .map(|v| (name.as_str().to_string(), v.to_string()))
+            })
+            .collect(),
+    };
+    let mut store = get_capture_store().lock().unwrap();
+    store.entry(port).or_default().push(captured);
+}
+
+/// Get all captured requests for a given worker port
+pub fn get_captured_requests(port: u16) -> Vec<CapturedRequest> {
+    let store = get_capture_store().lock().unwrap();
+    store.get(&port).cloned().unwrap_or_default()
+}
+
+/// Clear captured requests for a given worker port
+pub fn clear_captured_requests(port: u16) {
+    let mut store = get_capture_store().lock().unwrap();
+    store.remove(&port);
+}

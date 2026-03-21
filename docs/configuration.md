@@ -47,6 +47,11 @@ semantic_cluster:        # optional
     - name: my-cluster
       examples: ["example prompt 1", "example prompt 2"]
       workers: ["http://worker1:8000"]
+trace_config:                  # optional (enables OpenTelemetry tracing)
+  otlp_traces_endpoint: "localhost:4317"
+  sampling_ratio: 1.0
+  excluded_paths: ["/health", "/liveness", "/readiness"]
+
 expose_routing_headers: true   # optional (default: true)
 
 model_rules:                   # optional
@@ -289,3 +294,21 @@ Health checks run in a background loop. State changes are logged:
 - `info` when a worker goes from unhealthy → healthy
 - `warn` when a worker goes from healthy → unhealthy
 - `debug` when a worker remains unhealthy (set `RUST_LOG=debug` to see these)
+
+## OpenTelemetry Tracing
+
+Opt-in distributed tracing via OTLP. When enabled, the router emits spans visible in Jaeger, Grafana Tempo, or any OTLP-compatible backend.
+
+```yaml
+trace_config:
+  otlp_traces_endpoint: "localhost:4317"   # OTLP collector (gRPC)
+  sampling_ratio: 1.0                       # 0.0–1.0 (default: 1.0 = all)
+  excluded_paths:                           # paths that skip span creation
+    - "/health"
+    - "/liveness"
+    - "/readiness"
+```
+
+When `trace_config` is absent, tracing is completely disabled with near-zero overhead.
+
+The `otlp_traces_endpoint` can also be set via the standard `OTEL_EXPORTER_OTLP_ENDPOINT` environment variable — omit the field from YAML to use the env var.

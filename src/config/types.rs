@@ -821,6 +821,49 @@ impl Default for MetricsConfig {
     }
 }
 
+/// OpenTelemetry tracing configuration.
+///
+/// Presence of `Some(TraceConfig)` means tracing is enabled;
+/// `None` means tracing is disabled.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TraceConfig {
+    /// OTLP collector endpoint (format: host:port).
+    /// When None, the SDK respects OTEL_EXPORTER_OTLP_ENDPOINT.
+    #[serde(default)]
+    pub otlp_traces_endpoint: Option<String>,
+    /// Parent-based trace sampling ratio applied when there is no sampled parent.
+    #[serde(default = "TraceConfig::default_sampling_ratio")]
+    pub sampling_ratio: f64,
+    /// Exact HTTP paths whose server spans should be skipped even when tracing is enabled.
+    #[serde(default = "TraceConfig::default_excluded_paths")]
+    pub excluded_paths: Vec<String>,
+}
+
+impl TraceConfig {
+    pub fn default_sampling_ratio() -> f64 {
+        1.0
+    }
+
+    pub fn default_excluded_paths() -> Vec<String> {
+        vec![
+            "/health".to_string(),
+            "/health_generate".to_string(),
+            "/liveness".to_string(),
+            "/readiness".to_string(),
+        ]
+    }
+}
+
+impl Default for TraceConfig {
+    fn default() -> Self {
+        Self {
+            otlp_traces_endpoint: None,
+            sampling_ratio: Self::default_sampling_ratio(),
+            excluded_paths: Self::default_excluded_paths(),
+        }
+    }
+}
+
 impl Default for RouterConfig {
     fn default() -> Self {
         Self {

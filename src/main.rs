@@ -793,6 +793,7 @@ impl CliArgs {
                 Some(self.request_id_headers.clone())
             },
             config_file_path: self.config_file.clone(),
+            trace_config: None, // OTel tracing: configurable via YAML only for now
         }
     }
 }
