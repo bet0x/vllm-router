@@ -31,6 +31,11 @@ A high-performance, lightweight request forwarding system for vLLM large-scale d
 | Embeddings endpoint auth | ❌ | ✅ `embeddings_api_key` for semantic cache and cluster routing |
 | Graceful worker drain | ❌ | ✅ `POST /admin/drain` — stop traffic, wait for in-flight, then remove |
 | Hot config reload | ❌ | ✅ `POST /admin/reload` — re-read YAML, swap keys & workers without restart |
+| Routing explainability headers | ❌ | ✅ `x-vllm-router-*` headers on every response (worker, method, policy, cache status) |
+| Model aliasing & fallback | ❌ | ✅ `model_rules` — rewrite model names, wildcard matching, fallback chains |
+| Pre-routing hooks | ❌ | ✅ HTTP callouts to external services for safety, PII, custom validation |
+| Admin state endpoints | ❌ | ✅ `/admin/config`, `/admin/stats`, `/admin/decisions` |
+| Decision export & replay | ❌ | ✅ JSONL export + `vllm-router replay` for evidence-based policy comparison |
 
 ---
 
@@ -94,7 +99,7 @@ Detailed guides are in the [`docs/`](docs/) folder:
 | [Anthropic API](docs/anthropic-api.md) | Anthropic Messages API support and streaming |
 | [PD Disaggregation](docs/pd-disaggregation.md) | Prefill-Decode split inference, multi-turn with PD |
 | [Metrics](docs/metrics.md) | Full Prometheus metrics reference |
-| [Admin API](docs/admin-api.md) | Graceful worker drain and hot configuration reload |
+| [Admin API](docs/admin-api.md) | Graceful worker drain, hot config reload, active config/stats/decisions endpoints |
 | [LMCache Integration](docs/lmcache-integration.md) | LMCache controller-driven cache-aware routing |
 | [Kubernetes](docs/kubernetes.md) | Kubernetes service discovery setup |
 

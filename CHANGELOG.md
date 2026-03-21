@@ -5,6 +5,22 @@ Upstream: [vllm-project/router](https://github.com/vllm-project/router) | Fork: 
 
 ---
 
+## [0.7.0] — 2026-03-20
+
+### Added
+- **Routing explainability headers** — every response includes `x-vllm-router-worker`, `x-vllm-router-method`, `x-vllm-router-policy`, `x-vllm-router-cluster`, `x-vllm-router-model`, and `x-vllm-router-cache-status`. Controlled via `expose_routing_headers` config (default: true).
+- **Admin state endpoints** — `GET /admin/config` (redacted active config), `GET /admin/stats` (cache entries, worker health, policy assignments, uptime), `GET /admin/decisions?limit=N` (recent routing decisions from in-memory ring buffer).
+- **Model aliasing and fallback** — `model_rules` config section: rewrite model names before routing (exact match, wildcard `openai/*`, fallback chains that try models in order and pick the first with healthy workers).
+- **Pre-routing hooks** — `pre_routing_hooks` config section: ordered HTTP callouts to external services (safety, PII, custom validation) before routing. Hooks can allow, reject (403/400), or transform request bodies. Graceful degradation on timeout/error.
+- **Decision export and replay** — `decision_log` config section exports routing decisions to JSONL. `vllm-router replay --decisions file.jsonl --config new-config.yaml` compares routing strategies against historical traffic.
+- Sample config: `configs/round-robin-with-hooks.yaml`
+
+### Changed
+- **Policy factory uses registry pattern** — `PolicyFactory` now uses a `HashMap<String, Constructor>` instead of hardcoded match statements. External code can register custom policies via `global_factory().register()` before server start.
+- `PolicyRegistry` delegates to the global factory instead of duplicating match logic.
+
+---
+
 ## [0.6.11] — 2026-03-06
 
 ### Added

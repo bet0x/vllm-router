@@ -125,6 +125,69 @@ CLI-only setups will return `400 Bad Request`.
 }
 ```
 
+## Active Configuration
+
+### `GET /admin/config`
+
+Returns the running configuration as JSON. Sensitive fields (`api_key`, `admin_api_key`, `inbound_api_key`, `worker_api_keys` values, `embeddings_api_key`) are redacted as `"***"`.
+
+```bash
+curl -H 'Authorization: Bearer my-secret-admin-key' \
+  http://router:3000/admin/config | jq .policy
+```
+
+## Stats Snapshot
+
+### `GET /admin/stats`
+
+Returns a snapshot of internal state: cache stats, worker health, policy assignments, uptime.
+
+```json
+{
+  "uptime_secs": 3600,
+  "cache": {
+    "backend": "memory",
+    "exact_entries": 142,
+    "semantic_entries": 0
+  },
+  "workers": { "total": 4, "healthy": 3, "draining": 1 },
+  "policies": {
+    "default": "round_robin",
+    "per_model": { "llama-3": "cache_aware" }
+  },
+  "decisions_logged": 582
+}
+```
+
+## Recent Routing Decisions
+
+### `GET /admin/decisions?limit=50`
+
+Returns the last N routing decisions from an in-memory ring buffer (max 1000 entries). Each entry records how a request was routed: method, policy, worker, cache status, latency.
+
+```bash
+curl -H 'Authorization: Bearer my-secret-admin-key' \
+  'http://router:3000/admin/decisions?limit=5' | jq .
+```
+
+```json
+{
+  "decisions": [
+    {
+      "timestamp": "2026-03-20T18:30:00.123Z",
+      "route": "/v1/chat/completions",
+      "model": "llama-3",
+      "method": "policy",
+      "policy": "round_robin",
+      "worker": "http://localhost:8010",
+      "cache_status": "miss",
+      "status": 200,
+      "duration_ms": 85
+    }
+  ]
+}
+```
+
 ## Worker List
 
 The `GET /workers` endpoint now includes a `draining` field for each worker:

@@ -1,0 +1,63 @@
+# Round-Robin with model rules, pre-routing hooks, and decision export
+#
+# Demonstrates the Phase 1–5 features:
+#   - Routing explainability headers (x-vllm-router-*)
+#   - Model aliasing (gpt-4 → local model)
+#   - Pre-routing safety hook (external HTTP service)
+#   - Decision log export to JSONL
+#
+# Start:
+#   vllm-router --config-file configs/round-robin-with-hooks.yaml
+
+host: "0.0.0.0"
+port: 3000
+log_level: info
+
+mode:
+  type: regular
+  worker_urls:
+    - "http://localhost:8010"
+    - "http://localhost:8020"
+
+policy:
+  type: round_robin
+
+# Routing decision headers (x-vllm-router-*) on every response.
+# Disable with: expose_routing_headers: false
+expose_routing_headers: true
+
+# Model name rewriting — alias external model names to local models.
+# Rules are evaluated in order; first match wins.
+model_rules:
+  - match: "gpt-4"
+    rewrite: "RedHatAI/Llama-3.2-1B-Instruct-FP8"
+  - match: "gpt-3.5-turbo"
+    rewrite: "RedHatAI/Llama-3.2-1B-Instruct-FP8"
+  - match: "openai/*"
+    rewrite: "RedHatAI/Llama-3.2-1B-Instruct-FP8"
+
+# Pre-routing hooks — HTTP callouts to external services before routing.
+# Each hook receives the request body as JSON and responds with:
+#   {"action": "allow"}                     → continue routing
+#   {"action": "reject", "reason": "..."}   → block request (403/400)
+#   {"action": "transform", "body": {...}}  → replace request body
+#
+# pre_routing_hooks:
+#   - name: "content-safety"
+#     url: "http://localhost:9001/check"
+#     timeout_ms: 200
+#     on_error: pass      # pass (skip hook) or block (fail request)
+#     on_reject: block403  # block403, block400, or pass (ignore rejection)
+#   - name: "pii-mask"
+#     url: "http://localhost:9002/mask"
+#     timeout_ms: 100
+#     on_error: pass
+#     transform: true
+
+# Decision log export — write routing decisions to a JSONL file.
+# Use `vllm-router replay` to compare different configs against this data.
+#
+# decision_log:
+#   export_path: "/var/log/vllm-router/decisions.jsonl"
+#   export_interval_secs: 10
+#   include_request_text: false  # set true for content-aware replay

@@ -47,6 +47,39 @@ semantic_cluster:        # optional
     - name: my-cluster
       examples: ["example prompt 1", "example prompt 2"]
       workers: ["http://worker1:8000"]
+expose_routing_headers: true   # optional (default: true)
+
+model_rules:                   # optional
+  - match: "gpt-4"
+    rewrite: "meta-llama/Llama-3.1-70B"
+  - match: "openai/*"
+    rewrite: "meta-llama/Llama-3.1-70B"
+  - match: "llama-70b"
+    fallback:
+      - "meta-llama/Llama-3.1-70B-FP8"
+      - "meta-llama/Llama-3.1-8B-FP8"
+
+pre_routing_hooks:             # optional
+  - name: "content-safety"
+    url: "http://localhost:9001/check"
+    timeout_ms: 200
+    on_error: pass             # pass | block
+    on_reject: block403        # block403 | block400 | pass
+    transform: false
+
+cache:                         # optional (default: in-memory)
+  backend: redis
+  max_entries: 2048
+  ttl_secs: 120
+  redis:
+    url: "redis://127.0.0.1:6379/0"
+    pool_size: 8
+    key_prefix: "vllm-router:"
+
+decision_log:                  # optional
+  export_path: "/var/log/vllm-router/decisions.jsonl"
+  export_interval_secs: 10
+  include_request_text: false
 ```
 
 See individual files in `configs/` for per-policy documentation and inline comments.
@@ -146,6 +179,98 @@ metrics:
 When using `--config-file`, the `metrics` section in the YAML takes precedence over CLI flags.
 
 **Important:** For Kubernetes deployments, set `host: "0.0.0.0"` so Prometheus can scrape the pod. The default (`127.0.0.1`) only listens on localhost and is unreachable from outside the container.
+
+## Routing Explainability Headers
+
+Every response includes `x-vllm-router-*` headers showing how the routing decision was made:
+
+| Header | Value | When |
+|--------|-------|------|
+| `x-vllm-router-worker` | Worker URL that handled the request | When routed to a worker |
+| `x-vllm-router-method` | `cache-hit`, `semantic-hit`, `cluster`, `lmcache-prefix`, `policy` | Always |
+| `x-vllm-router-policy` | Policy name (e.g. `round_robin`) | When method=policy |
+| `x-vllm-router-cluster` | Semantic cluster name | When method=cluster |
+| `x-vllm-router-model` | Model ID routed to | Always |
+| `x-vllm-router-cache-status` | `exact-hit`, `semantic-hit`, `miss` | Non-streaming only |
+| `x-vllm-router-hooks` | Comma-separated list of hooks that ran | When hooks are configured |
+
+Disable with:
+
+```yaml
+expose_routing_headers: false
+```
+
+## Model Rules
+
+Rewrite model names before routing. Useful for aliasing external model names to local models, or providing fallback chains when a model has no healthy workers.
+
+```yaml
+model_rules:
+  # Simple alias
+  - match: "gpt-4"
+    rewrite: "meta-llama/Llama-3.1-70B"
+
+  # Wildcard: anything starting with "openai/"
+  - match: "openai/*"
+    rewrite: "meta-llama/Llama-3.1-70B"
+
+  # Fallback chain: try in order, use first with healthy workers
+  - match: "llama-70b"
+    fallback:
+      - "meta-llama/Llama-3.1-70B-FP8"
+      - "meta-llama/Llama-3.1-8B-FP8"
+```
+
+Rules are evaluated in order; first match wins. If no rule matches, the model name passes through unchanged.
+
+Model rules run before cache key computation and before semantic cluster routing, so the rewritten model name is used throughout the entire pipeline.
+
+## Pre-Routing Hooks
+
+HTTP callouts to external services that run before routing. Use for safety checks, PII detection, content moderation, or custom validation.
+
+```yaml
+pre_routing_hooks:
+  - name: "content-safety"
+    url: "http://localhost:9001/check"
+    timeout_ms: 200
+    on_error: pass        # pass = skip hook on error; block = fail request
+    on_reject: block403   # block403 | block400 | pass
+  - name: "pii-mask"
+    url: "http://localhost:9002/mask"
+    timeout_ms: 100
+    on_error: pass
+    transform: true       # replace request body with hook's response body
+```
+
+Each hook receives the request body as JSON via POST and must respond with:
+
+```json
+{"action": "allow"}
+{"action": "reject", "reason": "unsafe content"}
+{"action": "transform", "body": {"model": "...", "messages": [...]}}
+```
+
+Hooks run in order. If a hook rejects, the request is blocked immediately. If a hook transforms and `transform: true` is set, the modified body is used for subsequent hooks and routing.
+
+## Decision Log Export
+
+Export routing decisions to a JSONL file for analysis or replay.
+
+```yaml
+decision_log:
+  export_path: "/var/log/vllm-router/decisions.jsonl"
+  export_interval_secs: 10
+  include_request_text: false   # set true for content-aware replay
+```
+
+Each line in the JSONL file is a routing decision with timestamp, model, method, worker, cache status, and latency.
+
+Use `vllm-router replay` to compare routing strategies against exported decisions:
+
+```bash
+vllm-router replay --decisions decisions.jsonl --config configs/power-of-two.yaml
+```
 
 See [metrics.md](metrics.md) for the full metrics reference.
 

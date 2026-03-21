@@ -62,3 +62,27 @@ health_check:
   failure_threshold: 3
   success_threshold: 2
   endpoint: /health
+
+# ---------------------------------------------------------------------------
+# Optional features (see docs/configuration.md for details)
+# ---------------------------------------------------------------------------
+
+# Routing decision headers on every response (default: true)
+# expose_routing_headers: true
+
+# Model name rewriting (alias external names to local models)
+# model_rules:
+#   - match: "gpt-4"
+#     rewrite: "my-local-model"
+
+# Pre-routing hooks (safety, PII, custom validation via HTTP callouts)
+# pre_routing_hooks:
+#   - name: "content-safety"
+#     url: "http://localhost:9001/check"
+#     timeout_ms: 200
+#     on_error: pass
+
+# Decision log export (for `vllm-router replay`)
+# decision_log:
+#   export_path: "/var/log/vllm-router/decisions.jsonl"
+#   export_interval_secs: 10
