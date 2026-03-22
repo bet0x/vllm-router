@@ -93,3 +93,15 @@ health_check:
 # trace_config:
 #   otlp_traces_endpoint: "localhost:4317"
 #   sampling_ratio: 1.0
+
+# Token ID cache for LMCache prefix lookup (default: disabled)
+# prompt_cache:
+#   backend: redis
+#   ttl_secs: 3600
+
+# Shared prefix routing table for multi-instance cache-aware (default: disabled)
+# shared_prefix_routing:
+#   prefix_chars: 256
+#   ttl_secs: 300
+#   write_probability: 0.1
+#   backend: memory

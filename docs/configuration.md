@@ -85,6 +85,16 @@ decision_log:                  # optional
   export_path: "/var/log/vllm-router/decisions.jsonl"
   export_interval_secs: 10
   include_request_text: false
+
+prompt_cache:                  # optional (token ID cache for LMCache)
+  backend: redis
+  ttl_secs: 3600
+
+shared_prefix_routing:         # optional (multi-instance cache-aware)
+  prefix_chars: 256
+  ttl_secs: 300
+  write_probability: 0.1
+  backend: memory
 ```
 
 See individual files in `configs/` for per-policy documentation and inline comments.
@@ -312,3 +322,41 @@ trace_config:
 When `trace_config` is absent, tracing is completely disabled with near-zero overhead.
 
 The `otlp_traces_endpoint` can also be set via the standard `OTEL_EXPORTER_OTLP_ENDPOINT` environment variable — omit the field from YAML to use the env var.
+
+## Token ID Cache (Prompt Cache)
+
+Caches the result of `POST /tokenize` (token IDs) for the LMCache prefix lookup path. Eliminates redundant tokenization HTTP calls (~100ms each) for repeated system prompts and few-shot examples.
+
+```yaml
+prompt_cache:
+  backend: redis            # "memory" (default) or "redis"
+  ttl_secs: 3600            # 1 hour (default) — system prompts don't change often
+  max_entries: 10000        # memory backend only (default: 10000)
+  redis:                    # reuses cache.redis settings if not specified
+    url: "redis://127.0.0.1:6379/0"
+    key_prefix: "vllm-router:tokens:"
+```
+
+Only active when the `lmcache_aware` policy is in `prefix_lookup` mode. Without LMCache, this section has no effect.
+
+**Metrics:** `vllm_router_token_cache_hits_total`, `vllm_router_token_cache_misses_total`, `vllm_router_token_cache_entries`, `vllm_router_tokenize_duration_seconds{source=cache|worker}`.
+
+## Shared Prefix Routing Table
+
+Supplements the local in-memory radix tree in `cache_aware` policy with a shared prefix table. When multiple router instances share a Redis (or memory table in single-instance), they share knowledge of which worker has which prompt prefix cached.
+
+```yaml
+shared_prefix_routing:
+  prefix_chars: 256           # leading chars to hash (default: 256)
+  ttl_secs: 300               # 5 minutes (default)
+  write_probability: 0.1      # write to table 10% of the time (default)
+  read_on_local_miss: true    # query table when local tree misses (default: true)
+  backend: memory             # "memory" (default) or "redis"
+  redis:                      # reuses cache.redis settings if not specified
+    url: "redis://127.0.0.1:6379/0"
+    key_prefix: "vllm-router:routing:"
+```
+
+Works with `cache_aware` policy — no LMCache required. The local radix tree is authoritative; the shared table is a hint for cross-instance optimization.
+
+**Metrics:** `vllm_router_shared_prefix_hits_total`, `vllm_router_shared_prefix_misses_total`, `vllm_router_shared_prefix_writes_total`, `vllm_router_shared_prefix_stale_total`.

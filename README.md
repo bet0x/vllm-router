@@ -36,6 +36,8 @@ A high-performance, lightweight request forwarding system for vLLM large-scale d
 | Pre-routing hooks | ❌ | ✅ HTTP callouts to external services for safety, PII, custom validation |
 | Admin state endpoints | ❌ | ✅ `/admin/config`, `/admin/stats`, `/admin/decisions` |
 | Decision export & replay | ❌ | ✅ JSONL export + `vllm-router replay` for evidence-based policy comparison |
+| Token ID cache | ❌ | ✅ Cache tokenization results for LMCache prefix lookup (~100ms → <1ms) |
+| Shared prefix routing | ❌ | ✅ Multi-instance `cache_aware` via shared prefix table (memory/Redis) |
 
 ---
 

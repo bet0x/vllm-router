@@ -5,6 +5,14 @@ Upstream: [vllm-project/router](https://github.com/vllm-project/router) | Fork: 
 
 ---
 
+## [0.7.3] — 2026-03-22
+
+### Added
+- **Token ID cache** (`prompt_cache` config) — caches `hash(request_body) → token_ids` in memory or Redis. Eliminates the `POST /tokenize` HTTP round-trip (~100ms) for repeated system prompts in the LMCache prefix lookup path. Metrics: `vllm_router_token_cache_hits_total`, `_misses_total`, `_entries`, `vllm_router_tokenize_duration_seconds`.
+- **Shared prefix routing table** (`shared_prefix_routing` config) — supplements the local radix tree in `cache_aware` policy with a shared prefix→worker table. Enables multi-instance cache-aware routing. Reads on local miss, probabilistic writes (default 10%), TTL-based eviction. Metrics: `vllm_router_shared_prefix_hits_total`, `_misses_total`, `_writes_total`, `_stale_total`.
+
+---
+
 ## [0.7.2] — 2026-03-20
 
 ### Added
