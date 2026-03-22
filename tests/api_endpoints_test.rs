@@ -72,6 +72,7 @@ impl TestContext {
             model_rules: Vec::new(),
             pre_routing_hooks: Vec::new(),
             decision_log: None,
+            prompt_cache: None,
             tokenizer_model_map: std::collections::HashMap::new(),
         };
 
@@ -1421,6 +1422,7 @@ mod error_tests {
             model_rules: Vec::new(),
             pre_routing_hooks: Vec::new(),
             decision_log: None,
+            prompt_cache: None,
             tokenizer_model_map: std::collections::HashMap::new(),
         };
 
@@ -1794,6 +1796,7 @@ mod pd_mode_tests {
             model_rules: Vec::new(),
             pre_routing_hooks: Vec::new(),
             decision_log: None,
+            prompt_cache: None,
             tokenizer_model_map: std::collections::HashMap::new(),
         };
 
@@ -1971,6 +1974,7 @@ mod request_id_tests {
             model_rules: Vec::new(),
             pre_routing_hooks: Vec::new(),
             decision_log: None,
+            prompt_cache: None,
             tokenizer_model_map: std::collections::HashMap::new(),
         };
 

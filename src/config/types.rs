@@ -151,6 +151,34 @@ pub struct RouterConfig {
     /// When `None` (the default), decisions are kept in memory only.
     #[serde(default)]
     pub decision_log: Option<DecisionLogConfig>,
+    /// Prompt token ID cache for LMCache prefix lookup optimization.
+    /// When `None` (the default), every request tokenizes via HTTP.
+    #[serde(default)]
+    pub prompt_cache: Option<PromptCacheConfig>,
+}
+
+/// Token ID cache configuration for LMCache prefix lookup.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PromptCacheConfig {
+    /// Cache backend: `"memory"` (default) or `"redis"`.
+    #[serde(default = "default_cache_backend")]
+    pub backend: CacheBackend,
+    /// TTL in seconds for cached token IDs. Default: 3600 (1 hour).
+    #[serde(default = "default_prompt_cache_ttl_secs")]
+    pub ttl_secs: u64,
+    /// Maximum entries for in-memory backend. Default: 10000.
+    #[serde(default = "default_prompt_cache_max_entries")]
+    pub max_entries: usize,
+    /// Redis settings (reuses `cache.redis` if not specified here).
+    #[serde(default)]
+    pub redis: Option<RedisCacheConfig>,
+}
+
+fn default_prompt_cache_ttl_secs() -> u64 {
+    3600
+}
+fn default_prompt_cache_max_entries() -> usize {
+    10000
 }
 
 /// Decision log export configuration.
@@ -913,6 +941,7 @@ impl Default for RouterConfig {
             model_rules: Vec::new(),
             pre_routing_hooks: Vec::new(),
             decision_log: None,
+            prompt_cache: None,
         }
     }
 }
@@ -1495,6 +1524,7 @@ mod tests {
             model_rules: Vec::new(),
             pre_routing_hooks: Vec::new(),
             decision_log: None,
+            prompt_cache: None,
         };
 
         assert!(config.mode.is_pd_mode());
@@ -1573,6 +1603,7 @@ mod tests {
             model_rules: Vec::new(),
             pre_routing_hooks: Vec::new(),
             decision_log: None,
+            prompt_cache: None,
         };
 
         assert!(!config.mode.is_pd_mode());
@@ -1647,6 +1678,7 @@ mod tests {
             model_rules: Vec::new(),
             pre_routing_hooks: Vec::new(),
             decision_log: None,
+            prompt_cache: None,
         };
 
         assert!(config.has_service_discovery());

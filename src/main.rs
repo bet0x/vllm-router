@@ -742,6 +742,7 @@ impl CliArgs {
             model_rules: Vec::new(),
             pre_routing_hooks: Vec::new(),
             decision_log: None,
+            prompt_cache: None,
         })
     }
 

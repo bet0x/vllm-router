@@ -10,6 +10,7 @@
 //! over capacity, the oldest entries are removed (approximate LRU).
 
 pub mod semantic;
+pub mod token_cache;
 pub mod traits;
 
 #[cfg(feature = "redis-cache")]

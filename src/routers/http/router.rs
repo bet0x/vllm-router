@@ -177,6 +177,11 @@ pub struct Router {
     pre_routing_hooks: Vec<crate::hooks::PreRoutingHook>,
     /// Whether to capture request text in decision records (for replay).
     include_request_text: bool,
+    /// Token ID cache for LMCache prefix lookup optimization. None = no cache.
+    token_cache_memory: Option<Arc<crate::cache::token_cache::TokenCache>>,
+    /// Redis token cache (behind feature flag).
+    #[cfg(feature = "redis-cache")]
+    token_cache_redis: Option<Arc<crate::cache::token_cache::redis_backend::RedisTokenCache>>,
 }
 
 impl Router {
@@ -411,6 +416,9 @@ impl Router {
             model_rules: ctx.router_config.model_rules.clone(),
             pre_routing_hooks: ctx.router_config.pre_routing_hooks.clone(),
             include_request_text: ctx.router_config.decision_log.as_ref().map(|d| d.include_request_text).unwrap_or(false),
+            token_cache_memory: Self::build_token_cache_memory(&ctx.router_config),
+            #[cfg(feature = "redis-cache")]
+            token_cache_redis: Self::build_token_cache_redis(&ctx.router_config),
         };
 
         if let Some(ref url) = embeddings_url {
@@ -534,6 +542,69 @@ impl Router {
             crate::policies::SemanticClusterPolicy::from_parts(parts, config.threshold),
         ))
     }
+
+    /// Get cached token IDs (checks memory first, then Redis).
+    async fn token_cache_get(&self, key: u64) -> Option<Option<Vec<i64>>> {
+        // Check memory cache first
+        if let Some(ref mc) = self.token_cache_memory {
+            if let Some(tokens) = mc.get(key) {
+                return Some(Some(tokens));
+            }
+        }
+        // Check Redis cache
+        #[cfg(feature = "redis-cache")]
+        if let Some(ref rc) = self.token_cache_redis {
+            if let Some(tokens) = rc.get(key).await {
+                return Some(Some(tokens));
+            }
+        }
+        Some(None)
+    }
+
+    /// Store token IDs in the cache.
+    async fn token_cache_insert(&self, key: u64, tokens: &[i64]) {
+        if let Some(ref mc) = self.token_cache_memory {
+            mc.insert(key, tokens.to_vec());
+        }
+        #[cfg(feature = "redis-cache")]
+        if let Some(ref rc) = self.token_cache_redis {
+            rc.insert(key, tokens).await;
+        }
+    }
+
+    fn build_token_cache_memory(
+        config: &crate::config::types::RouterConfig,
+    ) -> Option<Arc<crate::cache::token_cache::TokenCache>> {
+        let pc = config.prompt_cache.as_ref()?;
+        if pc.backend != crate::config::types::CacheBackend::Memory {
+            return None;
+        }
+        info!(max_entries = pc.max_entries, ttl_secs = pc.ttl_secs, "token cache: in-memory");
+        Some(Arc::new(crate::cache::token_cache::TokenCache::new(pc.max_entries, pc.ttl_secs)))
+    }
+
+    #[cfg(feature = "redis-cache")]
+    fn build_token_cache_redis(
+        config: &crate::config::types::RouterConfig,
+    ) -> Option<Arc<crate::cache::token_cache::redis_backend::RedisTokenCache>> {
+        let pc = config.prompt_cache.as_ref()?;
+        if pc.backend != crate::config::types::CacheBackend::Redis {
+            return None;
+        }
+        // Use prompt_cache.redis, fall back to cache.redis
+        let redis_config = pc.redis.clone()
+            .or_else(|| config.cache.as_ref().and_then(|c| c.redis.clone()))
+            .unwrap_or_default();
+        info!(url = %redis_config.url, ttl_secs = pc.ttl_secs, "token cache: redis");
+        match crate::cache::token_cache::redis_backend::RedisTokenCache::new(&redis_config, pc.ttl_secs) {
+            Ok(cache) => Some(Arc::new(cache)),
+            Err(e) => {
+                warn!(error = %e, "token cache: failed to create Redis cache, falling back to none");
+                None
+            }
+        }
+    }
+
 
     /// Resolve model rules: alias, fallback, wildcard rewrite.
     /// Returns the (possibly rewritten) model name.
@@ -1207,13 +1278,33 @@ impl Router {
         // format as /v1/chat/completions (with messages + model)
         let request_body = serde_json::to_value(typed_req).ok()?;
 
-        // Step 1: Tokenize via vLLM /tokenize (applies chat template)
-        let tokens = LMCacheAwarePolicy::tokenize_via_worker(
-            &healthy_worker_url,
-            &request_body,
-            timeout,
-        )
-        .await?;
+        // Step 1: Tokenize — check token cache first, fall back to HTTP
+        let cache_key = crate::cache::token_cache::TokenCache::compute_key(&request_body);
+        let tokens = self.token_cache_get(cache_key).await.unwrap_or_else(|| None);
+
+        let tokens = if let Some(cached_tokens) = tokens {
+            RouterMetrics::record_token_cache_hit();
+            RouterMetrics::record_tokenize_duration(std::time::Duration::from_millis(0), "cache");
+            cached_tokens
+        } else {
+            RouterMetrics::record_token_cache_miss();
+            let start = std::time::Instant::now();
+            let fresh_tokens = LMCacheAwarePolicy::tokenize_via_worker(
+                &healthy_worker_url,
+                &request_body,
+                timeout,
+            )
+            .await?;
+            RouterMetrics::record_tokenize_duration(start.elapsed(), "worker");
+
+            // Store in cache (fire-and-forget)
+            self.token_cache_insert(cache_key, &fresh_tokens).await;
+            if let Some(ref mc) = self.token_cache_memory {
+                RouterMetrics::set_token_cache_entries(mc.len());
+            }
+
+            fresh_tokens
+        };
 
         // Step 2: POST /lookup to controller
         let preferred_url = lmcache_policy.prefix_lookup(&tokens).await?;
@@ -3053,6 +3144,9 @@ mod tests {
             model_rules: Vec::new(),
             pre_routing_hooks: Vec::new(),
             include_request_text: false,
+            token_cache_memory: None,
+            #[cfg(feature = "redis-cache")]
+            token_cache_redis: None,
         }
     }
 
@@ -3138,6 +3232,9 @@ mod tests {
             model_rules: Vec::new(),
             pre_routing_hooks: Vec::new(),
             include_request_text: false,
+            token_cache_memory: None,
+            #[cfg(feature = "redis-cache")]
+            token_cache_redis: None,
         }
     }
 

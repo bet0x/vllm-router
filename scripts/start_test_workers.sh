@@ -14,11 +14,11 @@
 
 set -e
 
-VENV="/home/alberto/vllm-dist"
+VENV="/home/alberto/Projects/vllm-dist"
 CHAT_MODEL="RedHatAI/Llama-3.2-1B-Instruct-FP8"
 EMBED_MODEL="BAAI/bge-small-en-v1.5"
-GPU_MEMORY_UTIL=0.3
-MAX_MODEL_LEN=32768
+GPU_MEMORY_UTIL=0.5
+MAX_MODEL_LEN=16768
 LOG_DIR="/tmp/vllm-test-workers"
 
 START_EMBED=false

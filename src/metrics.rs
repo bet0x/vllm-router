@@ -390,6 +390,28 @@ impl RouterMetrics {
         counter!("vllm_router_cache_misses_total").increment(1);
     }
 
+    // ── Token cache metrics ──
+
+    pub fn record_token_cache_hit() {
+        counter!("vllm_router_token_cache_hits_total").increment(1);
+    }
+
+    pub fn record_token_cache_miss() {
+        counter!("vllm_router_token_cache_misses_total").increment(1);
+    }
+
+    pub fn set_token_cache_entries(count: usize) {
+        gauge!("vllm_router_token_cache_entries").set(count as f64);
+    }
+
+    pub fn record_tokenize_duration(duration: std::time::Duration, source: &str) {
+        histogram!(
+            "vllm_router_tokenize_duration_seconds",
+            "source" => source.to_string()
+        )
+        .record(duration.as_secs_f64());
+    }
+
     pub fn set_tree_size(worker: &str, size: usize) {
         gauge!("vllm_router_tree_size",
             "worker" => worker.to_string()
