@@ -1426,6 +1426,7 @@ impl Router {
                     }
                     decision.method = Some("cache-hit");
                     decision.cache_status = Some("exact-hit");
+                    RouterMetrics::record_cache_hit();
                     if expose { decision.inject_headers(&mut resp); }
                     self.decision_log.push(decision.to_record(None, route, 200, 0));
                     return resp;
@@ -1482,6 +1483,7 @@ impl Router {
                         }
                         decision.method = Some("semantic-hit");
                         decision.cache_status = Some("semantic-hit");
+                        RouterMetrics::record_cache_hit();
                         if expose { decision.inject_headers(&mut resp); }
                         self.decision_log.push(decision.to_record(None, route, 200, 0));
                         return resp;
@@ -1491,6 +1493,7 @@ impl Router {
                 if let Some(ref s) = _sem_span { s.record("cache.status", "miss"); }
                 drop(_sem_span);
                 decision.cache_status = Some("miss");
+                RouterMetrics::record_cache_miss();
 
                 // 2b. Semantic cluster routing — pick the best-matching cluster worker.
                 // Returns (worker, cluster_name) so the cluster name can be logged + metered.

@@ -1,0 +1,32 @@
+# Observability stack for vllm-router
+#
+# Starts Prometheus (scraping router metrics on :29000) and Grafana
+# (pre-provisioned with the vllm-router dashboard).
+#
+# Usage:
+#   cd monitoring
+#   docker compose up -d
+#   open http://localhost:3001   # Grafana (admin/admin)
+#
+# Assumes the router is running on the host at :29000 (metrics) and :3000 (admin API).
+
+services:
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: vllm-prometheus
+    network_mode: host
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: vllm-grafana
+    network_mode: host
+    environment:
+      - GF_SERVER_HTTP_PORT=3001
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH=/var/lib/grafana/dashboards/vllm-router.json
+    volumes:
+      - ./provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./dashboards:/var/lib/grafana/dashboards:ro

@@ -1,0 +1,181 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    { "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 }, "id": 100, "title": "Overview", "type": "row" },
+    {
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 0 }] } } },
+      "gridPos": { "h": 4, "w": 4, "x": 0, "y": 1 }, "id": 1,
+      "options": { "colorMode": "value", "graphMode": "none", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "title": "Active Workers", "type": "stat",
+      "targets": [{ "expr": "vllm_router_active_workers" }]
+    },
+    {
+      "fieldConfig": { "defaults": { "unit": "reqps", "min": 0 } },
+      "gridPos": { "h": 4, "w": 4, "x": 4, "y": 1 }, "id": 2,
+      "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "title": "Request Rate", "type": "stat",
+      "targets": [{ "expr": "sum(rate(vllm_router_requests_total[1m])) or vector(0)" }]
+    },
+    {
+      "fieldConfig": { "defaults": { "unit": "s", "min": 0, "thresholds": { "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 0.5 }, { "color": "red", "value": 2 }] } } },
+      "gridPos": { "h": 4, "w": 4, "x": 8, "y": 1 }, "id": 3,
+      "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "title": "P99 Latency", "type": "stat",
+      "targets": [{ "expr": "histogram_quantile(0.99, sum(rate(vllm_router_generate_duration_seconds_bucket[5m])) by (le)) or vector(0)" }]
+    },
+    {
+      "fieldConfig": { "defaults": { "unit": "reqps", "min": 0, "thresholds": { "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 0.1 }] } } },
+      "gridPos": { "h": 4, "w": 4, "x": 12, "y": 1 }, "id": 4,
+      "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "title": "Error Rate", "type": "stat",
+      "targets": [{ "expr": "sum(rate(vllm_router_request_errors_total[1m])) or vector(0)" }]
+    },
+    {
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1, "thresholds": { "steps": [{ "color": "red", "value": null }, { "color": "yellow", "value": 0.5 }, { "color": "green", "value": 0.8 }] }, "noValue": "N/A" } },
+      "gridPos": { "h": 4, "w": 4, "x": 16, "y": 1 }, "id": 5,
+      "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "title": "Cache Hit Ratio", "type": "stat",
+      "targets": [{ "expr": "sum(rate(vllm_router_cache_hits_total[5m])) / (sum(rate(vllm_router_cache_hits_total[5m])) + sum(rate(vllm_router_cache_misses_total[5m])))" }]
+    },
+    {
+      "fieldConfig": { "defaults": { "min": 0, "thresholds": { "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 1 }, { "color": "red", "value": 10 }] } } },
+      "gridPos": { "h": 4, "w": 4, "x": 20, "y": 1 }, "id": 6,
+      "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "title": "Retries / min", "type": "stat",
+      "targets": [{ "expr": "sum(rate(vllm_router_retries_total[1m])) * 60 or vector(0)" }]
+    },
+
+    { "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 5 }, "id": 200, "title": "Request Traffic", "type": "row" },
+    {
+      "fieldConfig": { "defaults": { "unit": "reqps" } },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 }, "id": 10,
+      "options": { "legend": { "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "title": "Requests/sec by Route", "type": "timeseries",
+      "targets": [{ "expr": "sum(rate(vllm_router_requests_total[1m])) by (route)", "legendFormat": "{{route}}" }]
+    },
+    {
+      "fieldConfig": { "defaults": { "unit": "s" } },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 }, "id": 11,
+      "options": { "legend": { "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "title": "Latency Percentiles", "type": "timeseries",
+      "targets": [
+        { "expr": "histogram_quantile(0.50, sum(rate(vllm_router_generate_duration_seconds_bucket[5m])) by (le))", "legendFormat": "P50" },
+        { "expr": "histogram_quantile(0.95, sum(rate(vllm_router_generate_duration_seconds_bucket[5m])) by (le))", "legendFormat": "P95" },
+        { "expr": "histogram_quantile(0.99, sum(rate(vllm_router_generate_duration_seconds_bucket[5m])) by (le))", "legendFormat": "P99" }
+      ]
+    },
+
+    { "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 14 }, "id": 300, "title": "Workers", "type": "row" },
+    {
+      "fieldConfig": { "defaults": { "unit": "reqps" } },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 15 }, "id": 20,
+      "options": { "legend": { "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "title": "Requests/sec per Worker", "type": "timeseries",
+      "targets": [{ "expr": "sum(rate(vllm_router_worker_requests_total[1m])) by (worker)", "legendFormat": "{{worker}}" }]
+    },
+    {
+      "fieldConfig": { "defaults": { "unit": "short" } },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 15 }, "id": 21,
+      "options": { "legend": { "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "title": "Processed Requests (total)", "type": "timeseries",
+      "targets": [
+        { "expr": "vllm_router_processed_requests_total", "legendFormat": "{{worker}}" }
+      ]
+    },
+    {
+      "fieldConfig": { "defaults": { "mappings": [{ "type": "value", "options": { "0": { "text": "Closed", "color": "green" }, "1": { "text": "Open", "color": "red" }, "2": { "text": "Half-Open", "color": "yellow" } } }] } },
+      "gridPos": { "h": 4, "w": 24, "x": 0, "y": 23 }, "id": 22,
+      "options": { "colorMode": "background", "graphMode": "none", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "title": "Circuit Breaker State", "type": "stat",
+      "targets": [{ "expr": "vllm_router_cb_state", "legendFormat": "{{worker}}" }]
+    },
+
+    { "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 27 }, "id": 400, "title": "Routing Decisions", "type": "row" },
+    {
+      "fieldConfig": { "defaults": { "unit": "reqps" } },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 28 }, "id": 30,
+      "options": { "legend": { "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "title": "Routing Method", "type": "timeseries",
+      "targets": [{ "expr": "sum(rate(vllm_router_worker_requests_total[1m])) by (routing)", "legendFormat": "{{routing}}" }]
+    },
+    {
+      "fieldConfig": { "defaults": { "unit": "reqps" } },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 28 }, "id": 31,
+      "options": { "legend": { "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "title": "Policy → Worker", "type": "timeseries",
+      "targets": [{ "expr": "sum(rate(vllm_router_policy_decisions_total[1m])) by (policy, worker)", "legendFormat": "{{policy}} → {{worker}}" }]
+    },
+
+    { "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 36 }, "id": 500, "title": "Cache & Prefix", "type": "row" },
+    {
+      "fieldConfig": { "defaults": { "unit": "ops" } },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 37 }, "id": 40,
+      "options": { "legend": { "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "title": "Response Cache", "type": "timeseries",
+      "targets": [
+        { "expr": "rate(vllm_router_cache_hits_total[1m])", "legendFormat": "hits" },
+        { "expr": "rate(vllm_router_cache_misses_total[1m])", "legendFormat": "misses" }
+      ]
+    },
+    {
+      "fieldConfig": { "defaults": { "unit": "ops" } },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 37 }, "id": 41,
+      "options": { "legend": { "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "title": "Token Cache", "type": "timeseries",
+      "targets": [
+        { "expr": "rate(vllm_router_token_cache_hits_total[1m])", "legendFormat": "hits" },
+        { "expr": "rate(vllm_router_token_cache_misses_total[1m])", "legendFormat": "misses" }
+      ]
+    },
+    {
+      "fieldConfig": { "defaults": { "unit": "ops" } },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 37 }, "id": 42,
+      "options": { "legend": { "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "title": "Shared Prefix Table", "type": "timeseries",
+      "targets": [
+        { "expr": "rate(vllm_router_shared_prefix_hits_total[1m])", "legendFormat": "hits" },
+        { "expr": "rate(vllm_router_shared_prefix_misses_total[1m])", "legendFormat": "misses" },
+        { "expr": "rate(vllm_router_shared_prefix_writes_total[1m])", "legendFormat": "writes" },
+        { "expr": "rate(vllm_router_shared_prefix_stale_total[1m])", "legendFormat": "stale" }
+      ]
+    },
+
+    { "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 45 }, "id": 600, "title": "Reliability", "type": "row" },
+    {
+      "fieldConfig": { "defaults": { "unit": "ops" } },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 46 }, "id": 50,
+      "options": { "legend": { "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "title": "Retries", "type": "timeseries",
+      "targets": [
+        { "expr": "sum(rate(vllm_router_retries_total[1m])) by (route)", "legendFormat": "retries {{route}}" },
+        { "expr": "sum(rate(vllm_router_retries_exhausted_total[1m])) by (route)", "legendFormat": "exhausted {{route}}" }
+      ]
+    },
+    {
+      "fieldConfig": { "defaults": { "unit": "ops" } },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 46 }, "id": 51,
+      "options": { "legend": { "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "title": "Circuit Breaker Outcomes", "type": "timeseries",
+      "targets": [{ "expr": "sum(rate(vllm_router_cb_outcomes_total[1m])) by (worker, outcome)", "legendFormat": "{{worker}} {{outcome}}" }]
+    },
+    {
+      "fieldConfig": { "defaults": { "unit": "ops" } },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 46 }, "id": 52,
+      "options": { "legend": { "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "title": "Errors by Type", "type": "timeseries",
+      "targets": [{ "expr": "sum(rate(vllm_router_request_errors_total[1m])) by (error_type)", "legendFormat": "{{error_type}}" }]
+    }
+  ],
+  "schemaVersion": 39,
+  "tags": ["vllm", "router", "inference"],
+  "templating": { "list": [] },
+  "time": { "from": "now-15m", "to": "now" },
+  "timezone": "browser",
+  "title": "vLLM Router",
+  "uid": "vllm-router",
+  "version": 2
+}
