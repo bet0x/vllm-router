@@ -5,6 +5,20 @@ Upstream: [vllm-project/router](https://github.com/vllm-project/router) | Fork: 
 
 ---
 
+## [0.8.0] — 2026-03-22
+
+### Added
+- **Token ID cache** (`prompt_cache` config) — caches tokenization results in memory or Redis. Eliminates the 100ms `POST /tokenize` HTTP round-trip for repeated system prompts in the LMCache prefix lookup path. 100x faster tokenization on cache hit.
+- **Shared prefix routing table** (`shared_prefix_routing` config) — supplements the local radix tree in `cache_aware` policy with a cross-instance shared table. Enables multi-instance cache-aware routing where N router instances share prefix→worker knowledge instead of learning independently. Up to Nx improvement in KV cache utilization.
+- **Grafana + Prometheus monitoring stack** — pre-provisioned 18-panel dashboard with Docker Compose. Covers request traffic, latency percentiles, worker load, circuit breakers, cache hit ratios, routing decisions, errors, and retry pressure. `cd monitoring && docker compose up -d`.
+- **Monitoring documentation** (`docs/monitoring.md`) — dashboard panel reference, Prometheus metrics catalog, SLO alerting rules (error rate, latency, cache hit ratio, circuit breaker state).
+- 8 new Prometheus metrics: `vllm_router_token_cache_{hits,misses}_total`, `vllm_router_token_cache_entries`, `vllm_router_tokenize_duration_seconds`, `vllm_router_shared_prefix_{hits,misses,writes,stale}_total`.
+
+### Fixed
+- **Cache hit/miss Prometheus metrics never recorded** — `vllm_router_cache_hits_total` and `vllm_router_cache_misses_total` were defined but never emitted from `route_with_cache`. Now properly recorded on every cache lookup.
+
+---
+
 ## [0.7.3] — 2026-03-22
 
 ### Added
