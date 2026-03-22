@@ -743,6 +743,7 @@ impl CliArgs {
             pre_routing_hooks: Vec::new(),
             decision_log: None,
             prompt_cache: None,
+            shared_prefix_routing: None,
         })
     }
 

@@ -82,6 +82,9 @@ pub struct CacheAwarePolicy {
     config: CacheAwareConfig,
     trees: Arc<DashMap<String, Arc<Tree>>>, // model_id -> Arc<Tree>
     eviction_handle: Option<thread::JoinHandle<()>>,
+    /// Shared prefix routing table (memory). Set via `set_shared_prefix_config()`.
+    shared_prefix_table_memory: parking_lot::RwLock<Option<Arc<crate::cache::prefix_table::MemoryPrefixTable>>>,
+    shared_prefix_write_probability: std::sync::atomic::AtomicU32,
 }
 
 impl CacheAwarePolicy {
@@ -90,6 +93,13 @@ impl CacheAwarePolicy {
     }
 
     pub fn with_config(config: CacheAwareConfig) -> Self {
+        Self::with_config_and_prefix_table(config, None)
+    }
+
+    pub fn with_config_and_prefix_table(
+        config: CacheAwareConfig,
+        _spr_config: Option<&crate::config::types::SharedPrefixRoutingConfig>,
+    ) -> Self {
         let trees = Arc::new(DashMap::<String, Arc<Tree>>::new());
 
         // Start background eviction thread if configured
@@ -120,6 +130,34 @@ impl CacheAwarePolicy {
             config,
             trees,
             eviction_handle,
+            shared_prefix_table_memory: parking_lot::RwLock::new(None),
+            shared_prefix_write_probability: std::sync::atomic::AtomicU32::new(0),
+        }
+    }
+
+    /// Configure shared prefix routing after construction.
+    /// Called from the Router when `shared_prefix_routing` is configured.
+    /// Uses interior mutability so it works through `Arc<dyn LoadBalancingPolicy>`.
+    pub fn set_shared_prefix_config(
+        &self,
+        config: &crate::config::types::SharedPrefixRoutingConfig,
+    ) {
+        self.shared_prefix_write_probability.store(
+            config.write_probability.to_bits(),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        if config.backend == crate::config::types::CacheBackend::Memory || config.backend == crate::config::types::CacheBackend::Redis {
+            // For the sync select_worker path, always use a memory table
+            // (Redis is async and can't be called from sync context)
+            *self.shared_prefix_table_memory.write() = Some(Arc::new(
+                crate::cache::prefix_table::MemoryPrefixTable::new(config.prefix_chars, config.ttl_secs),
+            ));
+            info!(
+                prefix_chars = config.prefix_chars,
+                ttl_secs = config.ttl_secs,
+                write_probability = config.write_probability,
+                "shared prefix routing: enabled"
+            );
         }
     }
 
@@ -319,16 +357,48 @@ impl LoadBalancingPolicy for CacheAwarePolicy {
                 .position(|w| w.url() == tenant_url)
                 .filter(|&idx| workers[idx].is_healthy())
         } else {
-            // Low cache match: use worker with minimum load
-            healthy_indices
-                .iter()
-                .min_by_key(|&&idx| workers[idx].load())
-                .copied()
+            // Low cache match: check shared prefix table before falling back to min-load
+            let spt_guard = self.shared_prefix_table_memory.read();
+            let shared_hit = spt_guard.as_ref().and_then(|spt| {
+                let suggested_url = spt.get(model_id, text)?;
+                let idx = workers.iter().position(|w| w.url() == suggested_url)?;
+                if workers[idx].is_healthy() {
+                    RouterMetrics::record_shared_prefix_hit();
+                    debug!(worker = suggested_url.as_str(), "shared prefix table hit");
+                    Some(idx)
+                } else {
+                    RouterMetrics::record_shared_prefix_stale();
+                    None
+                }
+            });
+            if shared_hit.is_none() && spt_guard.is_some() {
+                RouterMetrics::record_shared_prefix_miss();
+            }
+            drop(spt_guard);
+            shared_hit.or_else(|| {
+                // Fallback: worker with minimum load
+                healthy_indices
+                    .iter()
+                    .min_by_key(|&&idx| workers[idx].load())
+                    .copied()
+            })
         };
 
         if let Some(idx) = selected_idx {
             // Update the tree with this request (use worker URL directly, no allocation)
             tree.insert(text, workers[idx].url());
+
+            // Probabilistically write to shared prefix table
+            let wp = f32::from_bits(self.shared_prefix_write_probability.load(std::sync::atomic::Ordering::Relaxed));
+            if wp > 0.0 {
+                let mut rng = rand::rng();
+                if rng.random::<f32>() < wp {
+                    if let Some(ref spt) = *self.shared_prefix_table_memory.read() {
+                        spt.insert(model_id, text, workers[idx].url());
+                        RouterMetrics::record_shared_prefix_write();
+                    }
+                }
+            }
 
             // Increment processed counter
             workers[idx].increment_processed();

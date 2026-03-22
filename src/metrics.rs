@@ -412,6 +412,24 @@ impl RouterMetrics {
         .record(duration.as_secs_f64());
     }
 
+    // ── Shared prefix routing metrics ──
+
+    pub fn record_shared_prefix_hit() {
+        counter!("vllm_router_shared_prefix_hits_total").increment(1);
+    }
+
+    pub fn record_shared_prefix_miss() {
+        counter!("vllm_router_shared_prefix_misses_total").increment(1);
+    }
+
+    pub fn record_shared_prefix_write() {
+        counter!("vllm_router_shared_prefix_writes_total").increment(1);
+    }
+
+    pub fn record_shared_prefix_stale() {
+        counter!("vllm_router_shared_prefix_stale_total").increment(1);
+    }
+
     pub fn set_tree_size(worker: &str, size: usize) {
         gauge!("vllm_router_tree_size",
             "worker" => worker.to_string()

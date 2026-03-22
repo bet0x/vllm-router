@@ -73,6 +73,7 @@ impl TestContext {
             pre_routing_hooks: Vec::new(),
             decision_log: None,
             prompt_cache: None,
+            shared_prefix_routing: None,
             tokenizer_model_map: std::collections::HashMap::new(),
         };
 
@@ -1423,6 +1424,7 @@ mod error_tests {
             pre_routing_hooks: Vec::new(),
             decision_log: None,
             prompt_cache: None,
+            shared_prefix_routing: None,
             tokenizer_model_map: std::collections::HashMap::new(),
         };
 
@@ -1797,6 +1799,7 @@ mod pd_mode_tests {
             pre_routing_hooks: Vec::new(),
             decision_log: None,
             prompt_cache: None,
+            shared_prefix_routing: None,
             tokenizer_model_map: std::collections::HashMap::new(),
         };
 
@@ -1975,6 +1978,7 @@ mod request_id_tests {
             pre_routing_hooks: Vec::new(),
             decision_log: None,
             prompt_cache: None,
+            shared_prefix_routing: None,
             tokenizer_model_map: std::collections::HashMap::new(),
         };
 

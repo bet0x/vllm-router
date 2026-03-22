@@ -9,6 +9,7 @@
 //! When the store exceeds `max_entries`, expired entries are evicted first; if still
 //! over capacity, the oldest entries are removed (approximate LRU).
 
+pub mod prefix_table;
 pub mod semantic;
 pub mod token_cache;
 pub mod traits;

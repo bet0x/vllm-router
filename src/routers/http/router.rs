@@ -287,6 +287,19 @@ impl Router {
             }
         }
 
+        // Configure shared prefix routing on cache_aware policies
+        if let Some(ref spr_config) = ctx.router_config.shared_prefix_routing {
+            let default_policy = ctx.policy_registry.get_default_policy();
+            if default_policy.name() == "cache_aware" {
+                if let Some(cache_aware) = default_policy
+                    .as_any()
+                    .downcast_ref::<crate::policies::CacheAwarePolicy>()
+                {
+                    cache_aware.set_shared_prefix_config(spr_config);
+                }
+            }
+        }
+
         // Setup load monitoring for PowerOfTwo policy
         let (tx, rx) = tokio::sync::watch::channel(HashMap::new());
         let worker_loads = Arc::new(rx);

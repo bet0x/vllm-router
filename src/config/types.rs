@@ -155,6 +155,46 @@ pub struct RouterConfig {
     /// When `None` (the default), every request tokenizes via HTTP.
     #[serde(default)]
     pub prompt_cache: Option<PromptCacheConfig>,
+    /// Shared prefix routing table for multi-instance cache-aware routing.
+    /// When `None` (the default), prefix knowledge is per-instance only.
+    #[serde(default)]
+    pub shared_prefix_routing: Option<SharedPrefixRoutingConfig>,
+}
+
+/// Shared prefix routing table configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SharedPrefixRoutingConfig {
+    /// Number of leading characters to hash for the prefix key. Default: 256.
+    #[serde(default = "default_prefix_chars")]
+    pub prefix_chars: usize,
+    /// TTL in seconds for prefix→worker mappings. Default: 300 (5 min).
+    #[serde(default = "default_prefix_ttl_secs")]
+    pub ttl_secs: u64,
+    /// Probability of writing to Redis after routing (0.0–1.0). Default: 0.1.
+    #[serde(default = "default_write_probability")]
+    pub write_probability: f32,
+    /// Query Redis when local tree has no match. Default: true.
+    #[serde(default = "default_read_on_local_miss")]
+    pub read_on_local_miss: bool,
+    /// Cache backend: `"memory"` or `"redis"`. Default: memory.
+    #[serde(default = "default_cache_backend")]
+    pub backend: CacheBackend,
+    /// Redis settings (reuses `cache.redis` if not specified).
+    #[serde(default)]
+    pub redis: Option<RedisCacheConfig>,
+}
+
+fn default_prefix_chars() -> usize {
+    256
+}
+fn default_prefix_ttl_secs() -> u64 {
+    300
+}
+fn default_write_probability() -> f32 {
+    0.1
+}
+fn default_read_on_local_miss() -> bool {
+    true
 }
 
 /// Token ID cache configuration for LMCache prefix lookup.
@@ -942,6 +982,7 @@ impl Default for RouterConfig {
             pre_routing_hooks: Vec::new(),
             decision_log: None,
             prompt_cache: None,
+            shared_prefix_routing: None,
         }
     }
 }
@@ -1525,6 +1566,7 @@ mod tests {
             pre_routing_hooks: Vec::new(),
             decision_log: None,
             prompt_cache: None,
+            shared_prefix_routing: None,
         };
 
         assert!(config.mode.is_pd_mode());
@@ -1604,6 +1646,7 @@ mod tests {
             pre_routing_hooks: Vec::new(),
             decision_log: None,
             prompt_cache: None,
+            shared_prefix_routing: None,
         };
 
         assert!(!config.mode.is_pd_mode());
@@ -1679,6 +1722,7 @@ mod tests {
             pre_routing_hooks: Vec::new(),
             decision_log: None,
             prompt_cache: None,
+            shared_prefix_routing: None,
         };
 
         assert!(config.has_service_discovery());
