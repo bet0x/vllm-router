@@ -24,7 +24,7 @@ Everything below is added by this fork. The [upstream router](https://github.com
 | Embeddings endpoint auth | `embeddings_api_key` for semantic cache and cluster routing |
 | Graceful worker drain | `POST /admin/drain` — stop traffic, wait for in-flight, then remove |
 | Hot config reload | `POST /admin/reload` — re-read YAML, swap keys & workers without restart |
-| Routing explainability headers | `x-vllm-router-*` headers on every response (worker, method, policy, cache status) |
+| Routing explainability headers | `x-vllm-router-*` headers on every response (worker, method, policy, cache status, similarity score) |
 | Model aliasing & fallback | `model_rules` — rewrite model names, wildcard matching, fallback chains |
 | Pre-routing hooks | HTTP callouts to external services for safety, PII, custom validation |
 | Admin state endpoints | `/admin/config`, `/admin/stats`, `/admin/decisions` |

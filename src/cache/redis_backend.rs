@@ -222,9 +222,9 @@ impl RedisSemanticCache {
 
 #[async_trait]
 impl SemanticCacheBackend for RedisSemanticCache {
-    async fn find_similar(&self, query: &[f32]) -> Option<(Bytes, Option<String>)> {
+    async fn find_similar(&self, query: &[f32]) -> Option<(Bytes, Option<String>, f32)> {
         let threshold = self.threshold;
-        let result: Option<(Bytes, Option<String>)> =
+        let result: Option<(Bytes, Option<String>, f32)> =
             tokio::time::timeout(self.command_timeout, async {
                 let mut conn = self.pool.get().await.map_err(|e| {
                     warn!(error = %e, "redis semantic cache: pool error on find_similar");
@@ -239,7 +239,7 @@ impl SemanticCacheBackend for RedisSemanticCache {
 
                 // Scan entries for the best match
                 let mut best_sim = threshold;
-                let mut best: Option<(Bytes, Option<String>)> = None;
+                let mut best: Option<(Bytes, Option<String>, f32)> = None;
 
                 // We only scan up to max_entries most recent entries
                 let start = count.saturating_sub(self.max_entries as u64);
@@ -257,7 +257,7 @@ impl SemanticCacheBackend for RedisSemanticCache {
                     let sim = Self::cosine_similarity(query, &entry.embedding);
                     if sim >= best_sim {
                         best_sim = sim;
-                        best = Some((Bytes::from(entry.body), entry.content_type));
+                        best = Some((Bytes::from(entry.body), entry.content_type, sim));
                     }
                 }
                 best

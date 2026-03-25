@@ -81,6 +81,10 @@ pub fn init_metrics() {
     );
     describe_counter!("vllm_router_cache_hits_total", "Total cache hits");
     describe_counter!("vllm_router_cache_misses_total", "Total cache misses");
+    describe_histogram!(
+        "vllm_router_cache_similarity",
+        "Cosine similarity score of semantic cache lookups"
+    );
     describe_gauge!(
         "vllm_router_tree_size",
         "Current tree size for cache-aware routing"
@@ -410,6 +414,10 @@ impl RouterMetrics {
 
     pub fn record_cache_miss() {
         counter!("vllm_router_cache_misses_total").increment(1);
+    }
+
+    pub fn record_cache_similarity(score: f32) {
+        histogram!("vllm_router_cache_similarity").record(score as f64);
     }
 
     // ── Token cache metrics ──

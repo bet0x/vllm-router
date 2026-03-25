@@ -47,6 +47,8 @@ pub const HEADER_CLUSTER: &str = "x-vllm-router-cluster";
 pub const HEADER_MODEL: &str = "x-vllm-router-model";
 /// Cache status: `exact-hit`, `semantic-hit`, or `miss`.
 pub const HEADER_CACHE_STATUS: &str = "x-vllm-router-cache-status";
+/// Cosine similarity score from the semantic cache lookup (0.0–1.0).
+pub const HEADER_CACHE_SIMILARITY: &str = "x-vllm-router-cache-similarity";
 /// Comma-separated list of hooks that executed.
 pub const HEADER_HOOKS: &str = "x-vllm-router-hooks";
 
@@ -58,6 +60,7 @@ pub const ALL_EXPLAINABILITY_HEADERS: &[&str] = &[
     HEADER_CLUSTER,
     HEADER_MODEL,
     HEADER_CACHE_STATUS,
+    HEADER_CACHE_SIMILARITY,
     HEADER_HOOKS,
 ];
 
@@ -71,6 +74,7 @@ pub(crate) struct RoutingDecision {
     pub(crate) cluster: Option<String>,
     pub(crate) model: Option<String>,
     pub(crate) cache_status: Option<&'static str>,
+    pub(crate) similarity_score: Option<f32>,
     pub(crate) hooks_ran: Vec<String>,
     pub(crate) request_text: Option<String>,
     pub(crate) tenant: Option<String>,
@@ -130,6 +134,11 @@ impl RoutingDecision {
         }
         if let Some(cs) = self.cache_status {
             h.insert(HEADER_CACHE_STATUS, HeaderValue::from_static(cs));
+        }
+        if let Some(score) = self.similarity_score {
+            if let Ok(v) = HeaderValue::from_str(&format!("{:.6}", score)) {
+                h.insert(HEADER_CACHE_SIMILARITY, v);
+            }
         }
         if !self.hooks_ran.is_empty() {
             if let Ok(v) = HeaderValue::from_str(&self.hooks_ran.join(",")) {
@@ -1482,9 +1491,10 @@ impl Router {
                 if let (Some(emb), Some(sem_cache)) =
                     (query_embedding.as_ref(), &self.semantic_cache)
                 {
-                    if let Some((cached_body, ct)) = sem_cache.find_similar(emb).await {
+                    if let Some((cached_body, ct, score)) = sem_cache.find_similar(emb).await {
                         if let Some(ref s) = _sem_span { s.record("cache.status", "hit"); }
-                        debug!("Semantic cache hit (similarity ≥ {})", sem_cache.threshold());
+                        debug!(score, threshold = sem_cache.threshold(), "Semantic cache hit");
+                        RouterMetrics::record_cache_similarity(score);
                         let mut resp = Response::new(axum::body::Body::from(cached_body));
                         *resp.status_mut() = StatusCode::OK;
                         if let Some(ct_str) = ct {
@@ -1494,6 +1504,7 @@ impl Router {
                         }
                         decision.method = Some("semantic-hit");
                         decision.cache_status = Some("semantic-hit");
+                        decision.similarity_score = Some(score);
                         RouterMetrics::record_cache_hit();
                         if expose { decision.inject_headers(&mut resp); }
                         self.decision_log.push(decision.to_record(None, route, 200, 0));
@@ -3646,6 +3657,7 @@ mod tests {
             cluster: None,
             model: Some("llama-3".to_string()),
             cache_status: Some("miss"),
+            similarity_score: None,
             hooks_ran: vec!["safety".to_string()],
             request_text: None,
             tenant: Some("ml-team".to_string()),
@@ -3659,6 +3671,7 @@ mod tests {
         assert!(h.get(HEADER_CLUSTER).is_none(), "cluster should be absent");
         assert_eq!(h.get(HEADER_MODEL).unwrap(), "llama-3");
         assert_eq!(h.get(HEADER_CACHE_STATUS).unwrap(), "miss");
+        assert!(h.get(HEADER_CACHE_SIMILARITY).is_none(), "no similarity on miss");
         assert_eq!(h.get(HEADER_HOOKS).unwrap(), "safety");
     }
 
@@ -3671,6 +3684,7 @@ mod tests {
             cluster: None,
             model: Some("gpt-4".to_string()),
             cache_status: Some("exact-hit"),
+            similarity_score: None,
             hooks_ran: vec![],
             request_text: None,
             tenant: None,
@@ -3682,7 +3696,32 @@ mod tests {
         assert_eq!(h.get(HEADER_METHOD).unwrap(), "cache-hit");
         assert!(h.get(HEADER_POLICY).is_none());
         assert_eq!(h.get(HEADER_CACHE_STATUS).unwrap(), "exact-hit");
+        assert!(h.get(HEADER_CACHE_SIMILARITY).is_none(), "no similarity on exact-hit");
         assert!(h.get(HEADER_HOOKS).is_none(), "no hooks header when empty");
+    }
+
+    #[test]
+    fn inject_headers_semantic_hit_with_score() {
+        let decision = RoutingDecision {
+            worker: None,
+            method: Some("semantic-hit"),
+            policy: None,
+            cluster: None,
+            model: Some("llama-3".to_string()),
+            cache_status: Some("semantic-hit"),
+            similarity_score: Some(0.973_215),
+            hooks_ran: vec![],
+            request_text: None,
+            tenant: None,
+        };
+        let mut resp = Response::new(Body::empty());
+        decision.inject_headers(&mut resp);
+        let h = resp.headers();
+        assert_eq!(h.get(HEADER_METHOD).unwrap(), "semantic-hit");
+        assert_eq!(h.get(HEADER_CACHE_STATUS).unwrap(), "semantic-hit");
+        let sim_val = h.get(HEADER_CACHE_SIMILARITY).expect("similarity header should be present");
+        let score: f32 = sim_val.to_str().unwrap().parse().unwrap();
+        assert!((score - 0.973_215).abs() < 1e-4, "score should round-trip through header");
     }
 
     #[test]
@@ -3694,6 +3733,7 @@ mod tests {
             cluster: Some("math".to_string()),
             model: None,
             cache_status: Some("miss"),
+            similarity_score: None,
             hooks_ran: vec!["pii".to_string(), "safety:timeout".to_string()],
             request_text: None,
             tenant: None,

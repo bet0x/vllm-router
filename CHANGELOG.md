@@ -5,6 +5,17 @@ Upstream: [vllm-project/router](https://github.com/vllm-project/router) | Fork: 
 
 ---
 
+## [0.9.1] — 2026-03-25
+
+### Added
+- **Cache similarity score header** (`x-vllm-router-cache-similarity`) — exposes the cosine similarity score from semantic cache lookups as a response header (when `expose_routing_headers` is enabled). Set on semantic cache hits, enabling operators to tune similarity thresholds, debug unexpected matches/misses, and build cache effectiveness dashboards.
+- **`vllm_router_cache_similarity` Prometheus histogram** — records the cosine similarity score on every semantic cache hit for observability and threshold calibration.
+
+### Changed
+- `SemanticCacheBackend::find_similar()` now returns the similarity score alongside the cached response (`Option<(Bytes, Option<String>, f32)>`).
+
+---
+
 ## [0.9.0] — 2026-03-24
 
 ### Added

@@ -92,3 +92,6 @@ Redis errors never fail a request. On timeout or connection error the cache retu
 - On a cache hit (exact or semantic), the cached response is returned immediately without contacting any backend worker.
 - On a miss, the response from the backend is stored in both the exact-match and semantic caches for future requests.
 - Entries are evicted after `ttl_secs` or when `max_entries` is reached (LRU).
+- When `expose_routing_headers` is enabled, cache responses include:
+  - `x-vllm-router-cache-status`: `exact-hit`, `semantic-hit`, or `miss`
+  - `x-vllm-router-cache-similarity`: cosine similarity score (only on `semantic-hit`, e.g. `0.973215`)

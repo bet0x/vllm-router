@@ -35,8 +35,9 @@ prometheus_port: 9000
 | `vllm_router_policy_decisions_total` | counter | `policy`, `worker` | Decisions made by each load-balancing policy |
 | `vllm_router_cluster_requests_total` | counter | `cluster`, `worker` | Requests routed via semantic cluster matching |
 | `vllm_router_cluster_fallback_total` | counter | `route` | Requests that fell below the similarity threshold and used the default policy |
-| `vllm_router_cache_hits_total` | counter | — | Exact-match cache hits |
-| `vllm_router_cache_misses_total` | counter | — | Exact-match cache misses |
+| `vllm_router_cache_hits_total` | counter | — | Exact-match and semantic cache hits |
+| `vllm_router_cache_misses_total` | counter | — | Cache misses (both exact and semantic) |
+| `vllm_router_cache_similarity` | histogram | — | Cosine similarity score on semantic cache hits (0.0–1.0) |
 | `vllm_router_running_requests` | gauge | `worker` | Running requests per worker (used by `cache_aware` policy) |
 | `vllm_router_tree_size` | gauge | `worker` | Prefix tree size per worker (`cache_aware` policy) |
 | `vllm_router_load_balancing_events_total` | counter | — | Load-balancing override events |

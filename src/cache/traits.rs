@@ -31,7 +31,8 @@ pub trait ExactMatchCache: Send + Sync + std::fmt::Debug {
 pub trait SemanticCacheBackend: Send + Sync + std::fmt::Debug {
     /// Find the best-matching cached response for `query` embedding.
     /// Returns `None` if no entry meets the similarity threshold.
-    async fn find_similar(&self, query: &[f32]) -> Option<(Bytes, Option<String>)>;
+    /// The `f32` in the tuple is the cosine similarity score of the match.
+    async fn find_similar(&self, query: &[f32]) -> Option<(Bytes, Option<String>, f32)>;
 
     /// Store a new embedding→response mapping.
     async fn insert(&self, embedding: Vec<f32>, body: Bytes, content_type: Option<String>);

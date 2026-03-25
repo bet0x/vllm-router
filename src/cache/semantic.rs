@@ -78,11 +78,11 @@ impl SemanticCache {
     /// `query` is ≥ `self.threshold`.
     ///
     /// Returns `None` if no matching entry exists.
-    pub fn find_similar(&self, query: &[f32]) -> Option<(Bytes, Option<String>)> {
+    pub fn find_similar(&self, query: &[f32]) -> Option<(Bytes, Option<String>, f32)> {
         let entries = self.entries.read();
         let now = Instant::now();
         let mut best_sim = self.threshold;
-        let mut best: Option<(Bytes, Option<String>)> = None;
+        let mut best: Option<(Bytes, Option<String>, f32)> = None;
 
         for entry in entries.iter() {
             if now.duration_since(entry.created_at) >= self.ttl {
@@ -91,7 +91,7 @@ impl SemanticCache {
             let sim = Self::cosine_similarity(query, &entry.embedding);
             if sim >= best_sim {
                 best_sim = sim;
-                best = Some((entry.body.clone(), entry.content_type.clone()));
+                best = Some((entry.body.clone(), entry.content_type.clone(), sim));
             }
         }
         best
@@ -145,7 +145,7 @@ impl SemanticCache {
 
 #[async_trait]
 impl SemanticCacheBackend for SemanticCache {
-    async fn find_similar(&self, query: &[f32]) -> Option<(Bytes, Option<String>)> {
+    async fn find_similar(&self, query: &[f32]) -> Option<(Bytes, Option<String>, f32)> {
         self.find_similar(query)
     }
 
@@ -182,8 +182,9 @@ mod tests {
         let emb = vec![1.0_f32, 0.0, 0.0];
         let body = Bytes::from_static(b"response");
         c.insert(emb.clone(), body.clone(), None);
-        let (got, _ct) = c.find_similar(&emb).expect("should hit identical embedding");
+        let (got, _ct, score) = c.find_similar(&emb).expect("should hit identical embedding");
         assert_eq!(got, body);
+        assert!((score - 1.0).abs() < 1e-6, "identical embedding should have score ~1.0");
     }
 
     #[test]
@@ -248,8 +249,9 @@ mod tests {
         // Insert two entries: one closer, one farther from [1,0]
         c.insert(vec![0.9_f32, 0.436], Bytes::from_static(b"far"), None);
         c.insert(vec![1.0_f32, 0.01], Bytes::from_static(b"close"), None);
-        let (body, _) = c.find_similar(&[1.0, 0.0]).expect("should find a match");
+        let (body, _, score) = c.find_similar(&[1.0, 0.0]).expect("should find a match");
         assert_eq!(body, Bytes::from_static(b"close"));
+        assert!(score > 0.5, "best match score should exceed threshold");
     }
 
     #[test]
