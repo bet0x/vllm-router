@@ -11,7 +11,8 @@ use std::collections::VecDeque;
 /// History:
 ///   1 — initial schema (v0.7.0)
 ///   2 — added `schema_version` and `hooks_ran` fields (v0.7.2)
-pub const DECISION_SCHEMA_VERSION: u32 = 2;
+///   3 — added `tenant` field for multi-tenant observability (v0.9.0)
+pub const DECISION_SCHEMA_VERSION: u32 = 3;
 
 /// A single routing decision record.
 ///
@@ -57,6 +58,10 @@ pub struct DecisionRecord {
     /// WARNING: may contain PII — do not enable in production without data handling review.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub request_text: Option<String>,
+    /// Tenant name that made the request (from multi-tenant API key auth).
+    /// Only populated when `api_keys` is configured. Never contains the raw key.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tenant: Option<String>,
 }
 
 fn default_schema_version() -> u32 {
@@ -108,7 +113,7 @@ pub const REQUIRED_FIELDS: &[&str] = &["schema_version", "timestamp", "route", "
 pub const ALL_FIELDS: &[&str] = &[
     "schema_version", "timestamp", "request_id", "route", "model",
     "method", "policy", "cluster", "worker", "cache_status",
-    "status", "duration_ms", "hooks_ran", "request_text",
+    "status", "duration_ms", "hooks_ran", "request_text", "tenant",
 ];
 
 /// Helper: current UTC timestamp as ISO-8601 string.
@@ -190,6 +195,7 @@ mod tests {
             duration_ms: 42,
             hooks_ran: vec!["safety".to_string(), "pii:timeout".to_string()],
             request_text: None,
+            tenant: Some("ml-team".to_string()),
         }
     }
 
@@ -209,6 +215,7 @@ mod tests {
             duration_ms: 0,
             hooks_ran: vec![],
             request_text: None,
+            tenant: None,
         }
     }
 
@@ -262,7 +269,7 @@ mod tests {
             serde_json::to_value(&minimal_record()).unwrap();
         let obj = json_val.as_object().unwrap();
         // These should NOT appear in the output:
-        for field in &["request_id", "model", "method", "policy", "cluster", "worker", "cache_status", "request_text", "hooks_ran"] {
+        for field in &["request_id", "model", "method", "policy", "cluster", "worker", "cache_status", "request_text", "hooks_ran", "tenant"] {
             assert!(!obj.contains_key(*field), "field {field} should be omitted when None/empty");
         }
     }

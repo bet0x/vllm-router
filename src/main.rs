@@ -744,6 +744,8 @@ impl CliArgs {
             decision_log: None,
             prompt_cache: None,
             shared_prefix_routing: None,
+            // Multi-tenant API keys — only configurable via YAML config file.
+            api_keys: Vec::new(),
         })
     }
 

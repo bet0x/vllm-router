@@ -271,6 +271,28 @@ pub fn init_metrics() {
         "vllm_router_cluster_fallback_total",
         "Requests that fell below the similarity threshold and used the default policy instead"
     );
+
+    // Per-tenant metrics (multi-API-key mode)
+    describe_counter!(
+        "vllm_router_tenant_requests_total",
+        "Total requests per tenant and route"
+    );
+    describe_histogram!(
+        "vllm_router_tenant_request_duration_seconds",
+        "Request duration per tenant and route"
+    );
+    describe_counter!(
+        "vllm_router_tenant_errors_total",
+        "Request errors per tenant, route, and error type"
+    );
+    describe_counter!(
+        "vllm_router_tenant_rate_limited_total",
+        "Requests rejected (429) due to per-tenant rate limiting"
+    );
+    describe_counter!(
+        "vllm_router_tenant_tokens_total",
+        "Total tokens used per tenant (from response body usage field)"
+    );
 }
 
 pub fn start_prometheus(config: PrometheusConfig) {
@@ -598,6 +620,46 @@ impl RouterMetrics {
             "route" => route.to_string()
         )
         .increment(1);
+    }
+
+    // Per-tenant metrics
+    pub fn record_tenant_request(tenant: &str, route: &str) {
+        counter!("vllm_router_tenant_requests_total",
+            "tenant" => tenant.to_string(),
+            "route" => route.to_string()
+        )
+        .increment(1);
+    }
+
+    pub fn record_tenant_request_duration(tenant: &str, route: &str, duration: Duration) {
+        histogram!("vllm_router_tenant_request_duration_seconds",
+            "tenant" => tenant.to_string(),
+            "route" => route.to_string()
+        )
+        .record(duration.as_secs_f64());
+    }
+
+    pub fn record_tenant_error(tenant: &str, route: &str, error_type: &str) {
+        counter!("vllm_router_tenant_errors_total",
+            "tenant" => tenant.to_string(),
+            "route" => route.to_string(),
+            "error_type" => error_type.to_string()
+        )
+        .increment(1);
+    }
+
+    pub fn record_tenant_rate_limited(tenant: &str) {
+        counter!("vllm_router_tenant_rate_limited_total",
+            "tenant" => tenant.to_string()
+        )
+        .increment(1);
+    }
+
+    pub fn record_tenant_tokens(tenant: &str, tokens: u64) {
+        counter!("vllm_router_tenant_tokens_total",
+            "tenant" => tenant.to_string()
+        )
+        .increment(tokens);
     }
 }
 

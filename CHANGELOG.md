@@ -5,6 +5,23 @@ Upstream: [vllm-project/router](https://github.com/vllm-project/router) | Fork: 
 
 ---
 
+## [0.9.0] — 2026-03-24
+
+### Added
+- **Multi-tenant API keys** (`api_keys` config) — per-tenant authentication with independent rate limits, model access control, and observability. Each key is stored as a SHA-256 hash (plaintext never kept in memory after init). Features:
+  - **Per-tenant rate limiting** — each key has its own token bucket (`rate_limit_rps`, `max_concurrent`). Exceeded limits return `429 Too Many Requests` with `X-RateLimit-Limit` and `Retry-After` headers.
+  - **Model access control** — `allowed_models` supports exact names and trailing wildcards (e.g. `Llama-3*`). Denied access returns `403 Forbidden`.
+  - **Disabled keys** — `enabled: false` revokes a key without removing it from config.
+  - **Hot reload** — `POST /admin/reload` reloads tenant keys from config without restart.
+  - **Observability** — tenant name in `/admin/decisions`, 5 new per-tenant Prometheus metrics (`vllm_router_tenant_requests_total`, `_request_duration_seconds`, `_errors_total`, `_rate_limited_total`, `_tokens_total`), `GET /admin/tenants` endpoint.
+  - **Priority order**: `api_keys` → `inbound_api_key` → `api_key_validation_urls` → open access. Backward compatible: empty `api_keys` preserves existing auth behavior.
+- **Decision log schema v3** — added `tenant` field to `DecisionRecord`.
+- `GET /admin/tenants` — list all tenants with live request/rate-limit counters.
+- `api_keys` example in all 13 `configs/*.yaml` files.
+- Documentation: `docs/authentication.md` (multi-tenant section), `docs/admin-api.md` (tenants endpoint), `docs/metrics.md` (per-tenant metrics).
+
+---
+
 ## [0.8.0] — 2026-03-22
 
 ### Added

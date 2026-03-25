@@ -80,3 +80,15 @@ prometheus_port: 9000
 | `vllm_tokenizer_encode_requests_total` | counter | `tokenizer_type` | Encode requests by tokenizer |
 | `vllm_tokenizer_factory_loads_total` | counter | `file_type` | Tokenizer load events |
 | `vllm_tokenizer_vocab_size` | gauge | — | Vocabulary size of the loaded tokenizer |
+
+## Per-tenant metrics
+
+These metrics are only emitted when multi-tenant API keys (`api_keys`) are configured.
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `vllm_router_tenant_requests_total` | counter | `tenant`, `route` | Request volume per tenant |
+| `vllm_router_tenant_request_duration_seconds` | histogram | `tenant`, `route` | Latency per tenant |
+| `vllm_router_tenant_errors_total` | counter | `tenant`, `route`, `error_type` | Error rate per tenant |
+| `vllm_router_tenant_rate_limited_total` | counter | `tenant` | 429 responses due to per-tenant rate limiting |
+| `vllm_router_tenant_tokens_total` | counter | `tenant` | Token usage per tenant (from response body) |

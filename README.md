@@ -39,6 +39,7 @@ A high-performance, lightweight request forwarding system for vLLM large-scale d
 | Token ID cache | ❌ | ✅ Cache tokenization results for LMCache prefix lookup (~100ms → <1ms) |
 | Shared prefix routing | ❌ | ✅ Multi-instance `cache_aware` via shared prefix table (memory/Redis) |
 | OpenTelemetry tracing | ❌ | ✅ OTLP distributed tracing with W3C TraceContext propagation |
+| Multi-tenant API keys | ❌ | ✅ Per-tenant rate limits, model ACL, SHA-256 hashed keys, hot reload |
 | Grafana dashboard | ❌ | ✅ Pre-provisioned 18-panel dashboard + Prometheus + Docker Compose |
 
 ---

@@ -13,6 +13,23 @@ host: "0.0.0.0"
 port: 3000
 log_level: info
 
+# Optional: protect /admin/* endpoints with a static API key.
+# admin_api_key: "my-secret-admin-key"
+
+# Multi-tenant API keys (per-tenant rate limits and model access control)
+# See docs/authentication.md for details.
+# api_keys:
+#   - key: "sk-team-ml-xxxxx"
+#     name: "ml-team"
+#     rate_limit_rps: 100
+#     max_concurrent: 50
+#     allowed_models: ["*"]
+#   - key: "sk-team-backend-yyyyy"
+#     name: "backend-team"
+#     rate_limit_rps: 50
+#     max_concurrent: 20
+#     allowed_models: ["Llama-3*"]
+
 mode:
   type: regular
   worker_urls:

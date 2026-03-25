@@ -7,6 +7,53 @@ The router handles authentication at two levels:
 
 ---
 
+## Multi-tenant API keys
+
+For multi-user deployments, configure `api_keys` with per-tenant rate limits and model access control:
+
+```yaml
+api_keys:
+  - key: "sk-team-ml-xxxxx"
+    name: "ml-team"
+    rate_limit_rps: 100        # requests/sec (own token bucket)
+    max_concurrent: 50         # max concurrent requests
+    allowed_models: ["*"]      # glob patterns for allowed models
+    enabled: true
+    metadata:
+      org: "ml-research"
+
+  - key: "sk-team-backend-yyyyy"
+    name: "backend-team"
+    rate_limit_rps: 50
+    max_concurrent: 20
+    allowed_models: ["Llama-3*"]
+    enabled: true
+    metadata:
+      org: "product-eng"
+```
+
+When `api_keys` is configured, it takes priority over `inbound_api_key` and `api_key_validation_urls`.
+
+**Features:**
+
+- **Per-tenant rate limiting** — each key has its own token bucket. Exceeded limits return `429 Too Many Requests` with `X-RateLimit-Limit` and `Retry-After` headers.
+- **Model access control** — `allowed_models` supports exact names and trailing wildcards (e.g. `Llama-3*`). Denied access returns `403 Forbidden`.
+- **Disabled keys** — set `enabled: false` to revoke a key without removing it.
+- **Observability** — tenant name appears in `/admin/decisions`, per-tenant Prometheus metrics (`vllm_router_tenant_*`), and `/admin/tenants`.
+- **Hot reload** — `POST /admin/reload` reloads tenant keys from config without restart.
+- **Security** — keys are stored as SHA-256 hashes in memory; the plaintext key is never kept after init.
+
+**Priority order** (when multiple auth methods are configured):
+
+```
+1. api_keys           (multi-tenant, per-key rate limits)
+2. inbound_api_key    (single static key)
+3. api_key_validation_urls (external service)
+4. open access        (if none configured)
+```
+
+---
+
 ## Inbound: client authentication
 
 ```yaml

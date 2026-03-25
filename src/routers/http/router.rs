@@ -73,6 +73,7 @@ pub(crate) struct RoutingDecision {
     pub(crate) cache_status: Option<&'static str>,
     pub(crate) hooks_ran: Vec<String>,
     pub(crate) request_text: Option<String>,
+    pub(crate) tenant: Option<String>,
 }
 
 impl RoutingDecision {
@@ -98,6 +99,7 @@ impl RoutingDecision {
             duration_ms,
             hooks_ran: self.hooks_ran.clone(),
             request_text: self.request_text.clone(),
+            tenant: self.tenant.clone(),
         }
     }
 
@@ -1348,7 +1350,16 @@ impl Router {
         use axum::http::header::CONTENT_TYPE;
 
         let expose = self.expose_routing_headers;
-        let mut decision = RoutingDecision::default();
+        // Extract tenant name from internal header (set by authorize_request)
+        let tenant = headers
+            .and_then(|h| h.get(crate::server::TENANT_HEADER))
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+
+        let mut decision = RoutingDecision {
+            tenant,
+            ..Default::default()
+        };
 
         // Resolve model rules (alias, fallback) before anything else.
         let resolved_model = self.resolve_model(model_id, &mut decision);
@@ -1856,6 +1867,15 @@ impl Router {
             status.as_u16(),
             duration.as_millis() as u64,
         ));
+
+        // Emit per-tenant metrics if a tenant was identified.
+        if let Some(ref tenant_name) = decision.tenant {
+            RouterMetrics::record_tenant_request(tenant_name, route);
+            RouterMetrics::record_tenant_request_duration(tenant_name, route, duration);
+            if !status.is_success() {
+                RouterMetrics::record_tenant_error(tenant_name, route, status.as_str());
+            }
+        }
 
         response
     }
@@ -3628,6 +3648,7 @@ mod tests {
             cache_status: Some("miss"),
             hooks_ran: vec!["safety".to_string()],
             request_text: None,
+            tenant: Some("ml-team".to_string()),
         };
         let mut resp = Response::new(Body::empty());
         decision.inject_headers(&mut resp);
@@ -3652,6 +3673,7 @@ mod tests {
             cache_status: Some("exact-hit"),
             hooks_ran: vec![],
             request_text: None,
+            tenant: None,
         };
         let mut resp = Response::new(Body::empty());
         decision.inject_headers(&mut resp);
@@ -3674,6 +3696,7 @@ mod tests {
             cache_status: Some("miss"),
             hooks_ran: vec!["pii".to_string(), "safety:timeout".to_string()],
             request_text: None,
+            tenant: None,
         };
         let mut resp = Response::new(Body::empty());
         decision.inject_headers(&mut resp);

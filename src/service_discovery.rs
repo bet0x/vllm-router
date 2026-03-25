@@ -647,6 +647,7 @@ mod tests {
             inbound_api_key: None,
             config_file_path: None,
             decision_log: Arc::new(crate::admin::DecisionLog::new(10)),
+            tenant_registry: Arc::new(tokio::sync::RwLock::new(None)),
         });
 
         let router = Router::new(vec![], &app_context).await.unwrap();

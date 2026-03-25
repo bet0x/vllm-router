@@ -159,6 +159,47 @@ pub struct RouterConfig {
     /// When `None` (the default), prefix knowledge is per-instance only.
     #[serde(default)]
     pub shared_prefix_routing: Option<SharedPrefixRoutingConfig>,
+    /// Multi-tenant API keys with per-tenant rate limits and model access control.
+    /// When empty (the default), authentication falls back to `inbound_api_key` / `api_key_validation_urls`.
+    #[serde(default)]
+    pub api_keys: Vec<ApiKeyEntry>,
+}
+
+/// A single tenant API key configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApiKeyEntry {
+    /// The raw API key string. Only used during config loading; stored as SHA-256 hash at runtime.
+    pub key: String,
+    /// Human-readable tenant name (used in metrics and decision log, never the raw key).
+    pub name: String,
+    /// Per-tenant request rate limit (requests per second). Token bucket refill rate.
+    #[serde(default = "default_tenant_rate_limit_rps")]
+    pub rate_limit_rps: usize,
+    /// Per-tenant maximum concurrent requests (token bucket capacity).
+    #[serde(default = "default_tenant_max_concurrent")]
+    pub max_concurrent: usize,
+    /// Glob patterns for allowed model names. `["*"]` means all models.
+    #[serde(default = "default_allowed_models")]
+    pub allowed_models: Vec<String>,
+    /// Whether this key is active. Disabled keys get 403 Forbidden.
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+    /// Arbitrary metadata for tracking/billing (e.g. `{"org": "acme-corp"}`).
+    #[serde(default)]
+    pub metadata: HashMap<String, String>,
+}
+
+fn default_tenant_rate_limit_rps() -> usize {
+    100
+}
+fn default_tenant_max_concurrent() -> usize {
+    50
+}
+fn default_allowed_models() -> Vec<String> {
+    vec!["*".to_string()]
+}
+fn default_enabled() -> bool {
+    true
 }
 
 /// Shared prefix routing table configuration.
@@ -983,6 +1024,7 @@ impl Default for RouterConfig {
             decision_log: None,
             prompt_cache: None,
             shared_prefix_routing: None,
+            api_keys: Vec::new(),
         }
     }
 }
@@ -1567,6 +1609,7 @@ mod tests {
             decision_log: None,
             prompt_cache: None,
             shared_prefix_routing: None,
+            api_keys: Vec::new(),
         };
 
         assert!(config.mode.is_pd_mode());
@@ -1647,6 +1690,7 @@ mod tests {
             decision_log: None,
             prompt_cache: None,
             shared_prefix_routing: None,
+            api_keys: Vec::new(),
         };
 
         assert!(!config.mode.is_pd_mode());
@@ -1723,6 +1767,7 @@ mod tests {
             decision_log: None,
             prompt_cache: None,
             shared_prefix_routing: None,
+            api_keys: Vec::new(),
         };
 
         assert!(config.has_service_discovery());

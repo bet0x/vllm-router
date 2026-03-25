@@ -182,7 +182,38 @@ curl -H 'Authorization: Bearer my-secret-admin-key' \
       "worker": "http://localhost:8010",
       "cache_status": "miss",
       "status": 200,
-      "duration_ms": 85
+      "duration_ms": 85,
+      "tenant": "ml-team"
+    }
+  ]
+}
+```
+
+The `tenant` field is only present when multi-tenant API keys are configured.
+
+## Tenant Management
+
+### `GET /admin/tenants`
+
+List all configured tenants with live status (requires multi-tenant `api_keys` to be configured):
+
+```bash
+curl -H 'Authorization: Bearer my-secret-admin-key' \
+  http://router:3000/admin/tenants | jq .
+```
+
+```json
+{
+  "tenants": [
+    {
+      "name": "ml-team",
+      "enabled": true,
+      "rate_limit_rps": 100,
+      "max_concurrent": 50,
+      "allowed_models": ["*"],
+      "total_requests": 58423,
+      "total_rate_limited": 17,
+      "metadata": { "org": "ml-research" }
     }
   ]
 }

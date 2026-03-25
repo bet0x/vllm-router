@@ -1,4 +1,5 @@
 use crate::{
+    auth::{TenantInfo, TenantRegistry},
     config::{ConnectionMode, HistoryBackend, RouterConfig},
     core::{WorkerRegistry, WorkerType},
     data_connector::{MemoryResponseStorage, NoOpResponseStorage, SharedResponseStorage},
@@ -61,6 +62,9 @@ pub struct AppContext {
     pub config_file_path: Option<String>,
     /// Ring buffer of recent routing decisions for /admin/decisions.
     pub decision_log: Arc<crate::admin::DecisionLog>,
+    /// Multi-tenant API key registry. None when `api_keys` is empty (single-key mode).
+    /// Wrapped in RwLock for hot reload support.
+    pub tenant_registry: Arc<RwLock<Option<Arc<TenantRegistry>>>>,
 }
 
 impl AppContext {
@@ -114,6 +118,18 @@ impl AppContext {
         let admin_api_key = router_config.admin_api_key.clone();
         let inbound_api_key = router_config.inbound_api_key.clone();
 
+        let tenant_registry = if router_config.api_keys.is_empty() {
+            Arc::new(RwLock::new(None))
+        } else {
+            info!(
+                "Multi-tenant mode: {} API keys configured",
+                router_config.api_keys.len()
+            );
+            Arc::new(RwLock::new(Some(Arc::new(TenantRegistry::from_config(
+                &router_config.api_keys,
+            )))))
+        };
+
         Ok(Self {
             client,
             router_config,
@@ -129,6 +145,7 @@ impl AppContext {
             inbound_api_key,
             config_file_path,
             decision_log: Arc::new(crate::admin::DecisionLog::new(1000)),
+            tenant_registry,
         })
     }
 }
@@ -150,12 +167,14 @@ async fn sink_handler() -> Response {
 /// Transparent proxy handler for unmatched routes
 /// Routes requests through the router's route_transparent method
 async fn transparent_proxy_handler(State(state): State<Arc<AppState>>, req: Request) -> Response {
-    let headers = req.headers().clone();
+    let mut headers = req.headers().clone();
 
     // Check authorization
-    if let Err(response) = authorize_request(&state, &headers).await {
-        return response;
-    }
+    let tenant = match authorize_request(&state, &headers).await {
+        Ok(t) => t,
+        Err(response) => return response,
+    };
+    inject_tenant(&mut headers, &tenant);
 
     // Extract path and method
     let path = req.uri().path().to_string();
@@ -215,7 +234,6 @@ async fn get_server_info(State(state): State<Arc<AppState>>, req: Request) -> Re
     if let Err(response) = authorize_request(&state, &headers).await {
         return response;
     }
-
     state.router.get_server_info(req).await
 }
 
@@ -224,7 +242,6 @@ async fn v1_models(State(state): State<Arc<AppState>>, req: Request) -> Response
     if let Err(response) = authorize_request(&state, &headers).await {
         return response;
     }
-
     state.router.get_models(req).await
 }
 
@@ -233,7 +250,6 @@ async fn get_model_info(State(state): State<Arc<AppState>>, req: Request) -> Res
     if let Err(response) = authorize_request(&state, &headers).await {
         return response;
     }
-
     state.router.get_model_info(req).await
 }
 
@@ -241,12 +257,14 @@ async fn get_model_info(State(state): State<Arc<AppState>>, req: Request) -> Res
 // The RouterTrait now accepts optional headers and typed body directly
 async fn generate(
     State(state): State<Arc<AppState>>,
-    headers: http::HeaderMap,
+    mut headers: http::HeaderMap,
     Json(body): Json<GenerateRequest>,
 ) -> Response {
-    if let Err(response) = authorize_request(&state, &headers).await {
-        return response;
-    }
+    let tenant = match authorize_request(&state, &headers).await {
+        Ok(t) => t,
+        Err(response) => return response,
+    };
+    inject_tenant(&mut headers, &tenant);
 
     state
         .router
@@ -256,12 +274,17 @@ async fn generate(
 
 async fn v1_chat_completions(
     State(state): State<Arc<AppState>>,
-    headers: http::HeaderMap,
+    mut headers: http::HeaderMap,
     Json(body): Json<ChatCompletionRequest>,
 ) -> Response {
-    if let Err(response) = authorize_request(&state, &headers).await {
+    let tenant = match authorize_request(&state, &headers).await {
+        Ok(t) => t,
+        Err(response) => return response,
+    };
+    if let Err(response) = check_tenant_model_access(&tenant, body.model.as_deref()) {
         return response;
     }
+    inject_tenant(&mut headers, &tenant);
 
     state
         .router
@@ -271,12 +294,17 @@ async fn v1_chat_completions(
 
 async fn v1_completions(
     State(state): State<Arc<AppState>>,
-    headers: http::HeaderMap,
+    mut headers: http::HeaderMap,
     Json(body): Json<CompletionRequest>,
 ) -> Response {
-    if let Err(response) = authorize_request(&state, &headers).await {
+    let tenant = match authorize_request(&state, &headers).await {
+        Ok(t) => t,
+        Err(response) => return response,
+    };
+    if let Err(response) = check_tenant_model_access(&tenant, body.model.as_deref()) {
         return response;
     }
+    inject_tenant(&mut headers, &tenant);
 
     state
         .router
@@ -286,12 +314,14 @@ async fn v1_completions(
 
 async fn rerank(
     State(state): State<Arc<AppState>>,
-    headers: http::HeaderMap,
+    mut headers: http::HeaderMap,
     Json(body): Json<RerankRequest>,
 ) -> Response {
-    if let Err(response) = authorize_request(&state, &headers).await {
-        return response;
-    }
+    let tenant = match authorize_request(&state, &headers).await {
+        Ok(t) => t,
+        Err(response) => return response,
+    };
+    inject_tenant(&mut headers, &tenant);
 
     state
         .router
@@ -301,12 +331,14 @@ async fn rerank(
 
 async fn v1_rerank(
     State(state): State<Arc<AppState>>,
-    headers: http::HeaderMap,
+    mut headers: http::HeaderMap,
     Json(body): Json<V1RerankReqInput>,
 ) -> Response {
-    if let Err(response) = authorize_request(&state, &headers).await {
-        return response;
-    }
+    let tenant = match authorize_request(&state, &headers).await {
+        Ok(t) => t,
+        Err(response) => return response,
+    };
+    inject_tenant(&mut headers, &tenant);
 
     state
         .router
@@ -316,12 +348,14 @@ async fn v1_rerank(
 
 async fn v1_responses(
     State(state): State<Arc<AppState>>,
-    headers: http::HeaderMap,
+    mut headers: http::HeaderMap,
     Json(body): Json<serde_json::Value>,
 ) -> Response {
-    if let Err(response) = authorize_request(&state, &headers).await {
-        return response;
-    }
+    let tenant = match authorize_request(&state, &headers).await {
+        Ok(t) => t,
+        Err(response) => return response,
+    };
+    inject_tenant(&mut headers, &tenant);
 
     state
         .router
@@ -331,12 +365,17 @@ async fn v1_responses(
 
 async fn v1_embeddings(
     State(state): State<Arc<AppState>>,
-    headers: http::HeaderMap,
+    mut headers: http::HeaderMap,
     Json(body): Json<EmbeddingRequest>,
 ) -> Response {
-    if let Err(response) = authorize_request(&state, &headers).await {
+    let tenant = match authorize_request(&state, &headers).await {
+        Ok(t) => t,
+        Err(response) => return response,
+    };
+    if let Err(response) = check_tenant_model_access(&tenant, body.model.as_deref()) {
         return response;
     }
+    inject_tenant(&mut headers, &tenant);
 
     state
         .router
@@ -353,12 +392,14 @@ async fn v1_embeddings(
 /// each OpenAI SSE chunk into one or more Anthropic SSE events.
 async fn v1_messages(
     State(state): State<Arc<AppState>>,
-    headers: http::HeaderMap,
+    mut headers: http::HeaderMap,
     Json(body): Json<MessagesRequest>,
 ) -> Response {
-    if let Err(response) = authorize_request(&state, &headers).await {
-        return response;
-    }
+    let tenant = match authorize_request(&state, &headers).await {
+        Ok(t) => t,
+        Err(response) => return response,
+    };
+    inject_tenant(&mut headers, &tenant);
 
     let original_model = body.model.clone();
     let is_stream = body.stream;
@@ -476,11 +517,7 @@ async fn v1_responses_get(
     if let Err(response) = authorize_request(&state, &headers).await {
         return response;
     }
-
-    state
-        .router
-        .get_response(Some(&headers), &response_id)
-        .await
+    state.router.get_response(Some(&headers), &response_id).await
 }
 
 async fn v1_responses_cancel(
@@ -491,11 +528,7 @@ async fn v1_responses_cancel(
     if let Err(response) = authorize_request(&state, &headers).await {
         return response;
     }
-
-    state
-        .router
-        .cancel_response(Some(&headers), &response_id)
-        .await
+    state.router.cancel_response(Some(&headers), &response_id).await
 }
 
 async fn v1_responses_delete(
@@ -506,12 +539,7 @@ async fn v1_responses_delete(
     if let Err(response) = authorize_request(&state, &headers).await {
         return response;
     }
-
-    // Python server does not support this yet
-    state
-        .router
-        .delete_response(Some(&headers), &response_id)
-        .await
+    state.router.delete_response(Some(&headers), &response_id).await
 }
 
 async fn v1_responses_list_input_items(
@@ -522,12 +550,7 @@ async fn v1_responses_list_input_items(
     if let Err(response) = authorize_request(&state, &headers).await {
         return response;
     }
-
-    // Python server does not support this yet
-    state
-        .router
-        .list_response_input_items(Some(&headers), &response_id)
-        .await
+    state.router.list_response_input_items(Some(&headers), &response_id).await
 }
 
 // ---------- Admin endpoints (drain + hot reload) ----------
@@ -551,6 +574,7 @@ struct DrainStatusQuery {
 /// Authorize an admin request.
 /// If `admin_api_key` is configured, check the Bearer token against it.
 /// Otherwise fall back to `authorize_request` (external validation URLs).
+#[allow(clippy::result_large_err)]
 async fn authorize_admin_request(
     state: &Arc<AppState>,
     headers: &http::HeaderMap,
@@ -575,7 +599,7 @@ async fn authorize_admin_request(
     }
 
     // No static admin key configured — fall back to the general auth mechanism
-    authorize_request(state, headers).await
+    authorize_request(state, headers).await.map(|_| ())
 }
 
 /// POST /admin/drain — mark a worker as draining, then remove it once load hits 0
@@ -733,6 +757,17 @@ async fn admin_reload(
         }
     };
 
+    // Reload tenant registry if api_keys changed
+    {
+        let new_registry = if new_config.api_keys.is_empty() {
+            None
+        } else {
+            Some(Arc::new(TenantRegistry::from_config(&new_config.api_keys)))
+        };
+        *state.context.tenant_registry.write().await = new_registry;
+        info!("Tenant registry reloaded ({} keys)", new_config.api_keys.len());
+    }
+
     // Sync workers: detect new and removed workers
     let current_urls: std::collections::HashSet<String> =
         state.router.get_worker_urls().into_iter().collect();
@@ -814,6 +849,16 @@ async fn admin_config(
                 *val = json!("***");
             }
         }
+        // Redact api_keys entries (show name only, not the key)
+        if let Some(keys) = obj.get_mut("api_keys").and_then(|v| v.as_array_mut()) {
+            for entry in keys.iter_mut() {
+                if let Some(obj) = entry.as_object_mut() {
+                    if obj.contains_key("key") {
+                        obj.insert("key".to_string(), json!("***"));
+                    }
+                }
+            }
+        }
         // Redact embeddings_api_key inside semantic_cache and semantic_cluster
         for section in &["semantic_cache", "semantic_cluster"] {
             if let Some(sc) = obj.get_mut(*section).and_then(|v| v.as_object_mut()) {
@@ -855,7 +900,7 @@ async fn admin_stats(
 
     let default_policy = state.context.policy_registry.get_default_policy();
 
-    Json(json!({
+    let mut stats = json!({
         "uptime_secs": state.start_time.elapsed().as_secs(),
         "cache": {
             "backend": cache_backend,
@@ -872,8 +917,19 @@ async fn admin_stats(
             "per_model": per_model,
         },
         "decisions_logged": state.context.decision_log.len(),
-    }))
-    .into_response()
+    });
+
+    // Add tenant summary if multi-tenant mode is active
+    let tenant_reg = state.context.tenant_registry.read().await;
+    if let Some(ref registry) = *tenant_reg {
+        let tenants = registry.list_tenants();
+        stats["tenants"] = json!({
+            "count": tenants.len(),
+            "entries": tenants,
+        });
+    }
+
+    Json(stats).into_response()
 }
 
 #[derive(Deserialize)]
@@ -883,6 +939,29 @@ struct DecisionsQuery {
 }
 fn default_decisions_limit() -> usize {
     50
+}
+
+/// GET /admin/tenants — list all configured tenants with live status
+async fn admin_tenants(
+    State(state): State<Arc<AppState>>,
+    headers: http::HeaderMap,
+) -> Response {
+    if let Err(response) = authorize_admin_request(&state, &headers).await {
+        return response;
+    }
+
+    let tenant_reg = state.context.tenant_registry.read().await;
+    match &*tenant_reg {
+        Some(registry) => {
+            let tenants = registry.list_tenants();
+            Json(json!({ "tenants": tenants })).into_response()
+        }
+        None => Json(json!({
+            "tenants": [],
+            "message": "Multi-tenant API keys not configured. Set api_keys in config."
+        }))
+        .into_response(),
+    }
 }
 
 /// GET /admin/decisions?limit=50 — recent routing decisions
@@ -901,6 +980,50 @@ async fn admin_decisions(
 const AUTH_FAILURE_MESSAGE: &str =
     "You must provide a valid API key. Obtain one from the panel or contact your administrator.";
 
+/// Internal header used to propagate tenant name from auth to routing pipeline.
+pub const TENANT_HEADER: &str = "x-vllm-tenant";
+
+/// Check if a tenant is allowed to access the requested model. Returns 403 if denied.
+#[allow(clippy::result_large_err)]
+fn check_tenant_model_access(
+    tenant: &Option<TenantInfo>,
+    model: Option<&str>,
+) -> Result<(), Response> {
+    if let Some(ref info) = tenant {
+        let model_name = match model {
+            Some(m) => m,
+            None => return Ok(()),
+        };
+        let allowed = info.allowed_models.iter().any(|pattern| {
+            if pattern == "*" {
+                return true;
+            }
+            if let Some(prefix) = pattern.strip_suffix('*') {
+                model_name.starts_with(prefix)
+            } else {
+                pattern == model_name
+            }
+        });
+        if !allowed {
+            return Err((
+                StatusCode::FORBIDDEN,
+                format!("Model '{model_name}' is not allowed for this API key."),
+            )
+                .into_response());
+        }
+    }
+    Ok(())
+}
+
+/// Inject tenant name into headers so the routing pipeline can read it.
+fn inject_tenant(headers: &mut http::HeaderMap, tenant: &Option<TenantInfo>) {
+    if let Some(ref info) = tenant {
+        if let Ok(v) = http::HeaderValue::from_str(&info.name) {
+            headers.insert(TENANT_HEADER, v);
+        }
+    }
+}
+
 // ---------- Worker management endpoints (Legacy) ----------
 
 #[derive(Deserialize)]
@@ -908,45 +1031,96 @@ struct UrlQuery {
     url: String,
 }
 
+/// Authenticate an incoming request.
+///
+/// Returns `Ok(Some(TenantInfo))` when multi-tenant API keys are configured and the
+/// key matched a tenant.  Returns `Ok(None)` when using single-key or open auth
+/// (no tenant context available).
 async fn authorize_request(
     state: &Arc<AppState>,
     headers: &http::HeaderMap,
-) -> Result<(), Response> {
-    // Static inbound API key check (simplest auth — no external service needed)
-    // Accepts: Authorization: Bearer <key> OR X-Router-Key: <key> (for k8s proxy)
-    if let Some(ref expected) = state.context.inbound_api_key {
-        let token = headers
-            .get(http::header::AUTHORIZATION)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|s| s.strip_prefix("Bearer "))
-            .map(str::trim)
-            .or_else(|| headers.get("X-Router-Key").and_then(|v| v.to_str().ok()).map(str::trim));
+) -> Result<Option<TenantInfo>, Response> {
+    // Extract token from Authorization: Bearer <key> OR X-Router-Key: <key>
+    let token = headers
+        .get(http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "))
+        .map(str::trim)
+        .or_else(|| headers.get("X-Router-Key").and_then(|v| v.to_str().ok()).map(str::trim));
 
+    // --- Multi-tenant API keys (highest priority) ---
+    let tenant_reg = state.context.tenant_registry.read().await;
+    if let Some(ref registry) = *tenant_reg {
+        let raw_key = token
+            .ok_or_else(|| (StatusCode::UNAUTHORIZED, AUTH_FAILURE_MESSAGE).into_response())?;
+
+        let tenant = registry.lookup(raw_key).ok_or_else(|| {
+            (StatusCode::UNAUTHORIZED, AUTH_FAILURE_MESSAGE).into_response()
+        })?;
+
+        if !tenant.enabled {
+            return Err((
+                StatusCode::FORBIDDEN,
+                "API key is disabled. Contact your administrator.",
+            )
+                .into_response());
+        }
+
+        // Per-tenant rate limiting
+        if tenant.rate_limiter.try_acquire(1.0).await.is_err() {
+            tenant
+                .total_rate_limited
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            crate::metrics::RouterMetrics::record_tenant_rate_limited(&tenant.name);
+
+            let mut resp = (
+                StatusCode::TOO_MANY_REQUESTS,
+                "Rate limit exceeded for this API key.",
+            )
+                .into_response();
+            resp.headers_mut().insert(
+                "X-RateLimit-Limit",
+                http::HeaderValue::from_str(&tenant.rate_limit_rps.to_string()).unwrap(),
+            );
+            resp.headers_mut().insert(
+                "Retry-After",
+                http::HeaderValue::from_static("1"),
+            );
+            return Err(resp);
+        }
+
+        tenant
+            .total_requests
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+        return Ok(Some(TenantInfo {
+            name: tenant.name.clone(),
+            allowed_models: tenant.allowed_models.clone(),
+            metadata: tenant.metadata.clone(),
+        }));
+    }
+
+    // --- Static inbound API key (single-key mode) ---
+    if let Some(ref expected) = state.context.inbound_api_key {
         if token == Some(expected.as_str()) {
-            return Ok(());
+            return Ok(None);
         }
         return Err((StatusCode::UNAUTHORIZED, AUTH_FAILURE_MESSAGE).into_response());
     }
 
+    // --- External validation URLs ---
     let validation_urls = state.context.api_key_validation_urls.as_ref();
     if validation_urls.is_empty() {
-        return Ok(());
+        return Ok(None); // Open access
     }
 
-    let auth_header = headers
-        .get(http::header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or_default();
-
-    let token = auth_header
-        .strip_prefix("Bearer ")
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+    let raw_token = token
+        .filter(|t| !t.is_empty())
         .ok_or_else(|| (StatusCode::UNAUTHORIZED, AUTH_FAILURE_MESSAGE).into_response())?;
 
-    if let Some(valid) = state.context.api_key_cache.read().await.get(token).copied() {
+    if let Some(valid) = state.context.api_key_cache.read().await.get(raw_token).copied() {
         if valid {
-            return Ok(());
+            return Ok(None);
         }
         return Err((StatusCode::UNAUTHORIZED, AUTH_FAILURE_MESSAGE).into_response());
     }
@@ -957,7 +1131,7 @@ async fn authorize_request(
             .context
             .client
             .get(url)
-            .header(http::header::AUTHORIZATION, format!("Bearer {token}"))
+            .header(http::header::AUTHORIZATION, format!("Bearer {raw_token}"))
             .send()
             .await
         {
@@ -979,10 +1153,10 @@ async fn authorize_request(
         .api_key_cache
         .write()
         .await
-        .insert(token.to_string(), validated);
+        .insert(raw_token.to_string(), validated);
 
     if validated {
-        Ok(())
+        Ok(None)
     } else {
         Err((StatusCode::UNAUTHORIZED, AUTH_FAILURE_MESSAGE).into_response())
     }
@@ -1294,7 +1468,8 @@ pub fn build_app_with_request_tracing(
         .route("/admin/reload", post(admin_reload))
         .route("/admin/config", get(admin_config))
         .route("/admin/stats", get(admin_stats))
-        .route("/admin/decisions", get(admin_decisions));
+        .route("/admin/decisions", get(admin_decisions))
+        .route("/admin/tenants", get(admin_tenants));
 
     // Worker management routes
     let worker_routes = Router::new()

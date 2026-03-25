@@ -75,6 +75,7 @@ impl TestContext {
             prompt_cache: None,
             shared_prefix_routing: None,
             tokenizer_model_map: std::collections::HashMap::new(),
+            api_keys: Vec::new(),
         };
 
         Self::new_with_config(config, worker_configs).await
@@ -1426,6 +1427,7 @@ mod error_tests {
             prompt_cache: None,
             shared_prefix_routing: None,
             tokenizer_model_map: std::collections::HashMap::new(),
+            api_keys: Vec::new(),
         };
 
         let ctx = TestContext::new_with_config(
@@ -1801,6 +1803,7 @@ mod pd_mode_tests {
             prompt_cache: None,
             shared_prefix_routing: None,
             tokenizer_model_map: std::collections::HashMap::new(),
+            api_keys: Vec::new(),
         };
 
         // Create app context
@@ -1980,6 +1983,7 @@ mod request_id_tests {
             prompt_cache: None,
             shared_prefix_routing: None,
             tokenizer_model_map: std::collections::HashMap::new(),
+            api_keys: Vec::new(),
         };
 
         let ctx = TestContext::new_with_config(
