@@ -26,6 +26,69 @@ The pre-provisioned Grafana dashboard includes 18 panels covering request traffi
 
 ---
 
+## Architecture
+
+```mermaid
+graph LR
+    Client([Clients<br/>OpenAI / Anthropic SDK])
+
+    Client -->|HTTP :3000| AUTH
+
+    subgraph Router["vllm-router"]
+        AUTH[Auth<br/>API Keys · Multi-tenant]
+        HOOKS[Hooks<br/>PII · Safety callouts]
+        EXACT[Exact Cache<br/>FNV-1a hash]
+        SEM[Semantic Cache<br/>Cosine similarity]
+        CLUSTER[Semantic Cluster<br/>Prompt → cluster]
+        POLICY[Load Balancer<br/>round_robin · cache_aware<br/>consistent_hash · random<br/>power_of_two · lmcache_aware]
+        RULES[Model Rules<br/>Alias · Wildcard · Fallback]
+        CB[Circuit Breaker<br/>+ Retry]
+        PD[PD Disaggregation<br/>Prefill ↔ Decode split]
+        ADMIN[Admin API<br/>drain · reload · stats<br/>decisions · tenants · config]
+        METRICS[Metrics<br/>67+ Prometheus counters<br/>OTel tracing]
+        HEADERS[Response Headers<br/>x-vllm-router-*<br/>cache-status · similarity]
+        TOK[Tokenizer<br/>HF · tiktoken · SentencePiece]
+        SD[Service Discovery<br/>Kubernetes · vLLM native]
+
+        AUTH --> HOOKS --> EXACT -->|miss| SEM -->|miss| CLUSTER -->|no match| POLICY
+        EXACT -->|hit| HEADERS
+        SEM -->|hit| HEADERS
+        POLICY --> RULES --> CB
+        CLUSTER -->|match| CB
+    end
+
+    CB -->|HTTP :8010| W1[vLLM Worker 1<br/>Llama-3 70B]
+    CB -->|HTTP :8020| W2[vLLM Worker 2<br/>Llama-3 70B]
+    PD -.->|prefill| PW[Prefill Worker]
+    PD -.->|decode| DW[Decode Worker]
+
+    EXACT -.->|redis backend| Redis[(Redis)]
+    SEM -.->|redis backend| Redis
+    TOK -.->|token cache| Redis
+    SEM -.->|fetch embedding| Emb[vLLM Embeddings<br/>bge-small-en :8030]
+    CLUSTER -.->|fetch embedding| Emb
+
+    HOOKS -.->|HTTP callout| HookSvc([Hook Services])
+
+    W1 <-.->|KV cache sync| LMC[LMCache<br/>Controller]
+    W2 <-.->|KV cache sync| LMC
+    LMC -.->|cache state| POLICY
+
+    SD -.->|watch pods| K8s([Kubernetes API])
+
+    METRICS -.->|/metrics| Prom[Prometheus :9090]
+    Prom -.-> Grafana[Grafana :3001]
+    METRICS -.->|OTLP/gRPC| OTLP([OTel Collector])
+```
+
+**Request pipeline** (solid lines): Auth → Hooks → Exact Cache → Semantic Cache → Semantic Cluster → Load Balancer → Model Rules → Circuit Breaker → Worker
+
+**Optional integrations** (dashed lines): Redis, Embeddings, LMCache, Kubernetes, Hooks, Prometheus, Grafana, OTel
+
+**Minimum deployment**: Router + 2 vLLM workers. Everything else is enabled via config.
+
+---
+
 ## Quick Start
 
 ### Prerequisites
