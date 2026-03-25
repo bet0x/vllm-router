@@ -1,7 +1,4 @@
-# vLLM Router — Extended Fork
-
-> **Fork of [vllm-project/router](https://github.com/vllm-project/router)**
-> This fork extends the upstream router with response caching, semantic cluster routing, Anthropic API support, and several production-readiness improvements. See [CHANGELOG.md](CHANGELOG.md) for the full list of additions.
+# vLLM Router
 
 A high-performance, lightweight request forwarding system for vLLM large-scale deployments, providing advanced load balancing, prefill/decode disaggregation, and semantic-aware routing.
 
@@ -11,7 +8,7 @@ A high-performance, lightweight request forwarding system for vLLM large-scale d
 
 Response caching (exact + semantic), semantic cluster routing, multi-tenant API keys, Anthropic Messages API, LMCache-aware routing, per-worker auth, graceful drain, hot reload, pre-routing hooks, model aliasing, OpenTelemetry tracing, Grafana dashboard, and 30+ more features.
 
-See **[FEATURES.md](FEATURES.md)** for the full comparison table and performance benchmarks.
+See **[FEATURES.md](FEATURES.md)** for the full comparison table and performance benchmarks. **[CHANGELOG.md](CHANGELOG.md)** for what's going on.
 
 ---
 
