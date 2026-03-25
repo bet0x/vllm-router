@@ -1,39 +1,39 @@
 # Features — vLLM Router Extended Fork
 
-Compared to the [upstream router](https://github.com/vllm-project/router), this fork adds:
+Everything below is added by this fork. The [upstream router](https://github.com/vllm-project/router) does not include any of these features.
 
-| Feature | Upstream | This fork |
-|---------|----------|-----------|
-| Config file (`--config-file`) | — | YAML config for all settings |
-| Exact-match response cache | — | FNV-1a, DashMap, TTL |
-| Semantic similarity cache | — | Cosine similarity + embeddings endpoint |
-| Semantic cluster routing | — | Route by prompt content to worker clusters |
-| Anthropic Messages API | — | `POST /v1/messages` with streaming |
-| Sticky sessions + graceful failover | — | DashMap TTL + ring walk on failure |
-| vLLM Semantic Router header propagation | — | `x-semantic-*` headers forwarded to workers |
-| SentencePiece tokenizer | — | Via system `libsentencepiece` |
-| Model-to-tokenizer mapping | — | `--tokenizer-model-map` substring match |
-| `POST /v1/completions` (OpenAI backend) | — | Proxy + streaming SSE |
-| `POST /v1/embeddings` (OpenAI backend) | — | Proxy |
-| `POST /v1/rerank` (OpenAI backend) | — | Proxy |
-| gRPC `SessionParams` / `ModelInfo` proto | — | In `vllm_scheduler.proto` |
-| LMCache-aware routing (`lmcache_aware`) | — | Real KV cache state from LMCache controller (occupancy + prefix lookup) |
-| Per-routing-decision Prometheus metrics | — | Worker, cluster, and fallback counters |
-| INFO-level routing logs | — | Model, worker, method, status, duration |
-| Per-worker API keys | — | Each backend can have its own `Authorization: Bearer` key |
-| Embeddings endpoint auth | — | `embeddings_api_key` for semantic cache and cluster routing |
-| Graceful worker drain | — | `POST /admin/drain` — stop traffic, wait for in-flight, then remove |
-| Hot config reload | — | `POST /admin/reload` — re-read YAML, swap keys & workers without restart |
-| Routing explainability headers | — | `x-vllm-router-*` headers on every response (worker, method, policy, cache status) |
-| Model aliasing & fallback | — | `model_rules` — rewrite model names, wildcard matching, fallback chains |
-| Pre-routing hooks | — | HTTP callouts to external services for safety, PII, custom validation |
-| Admin state endpoints | — | `/admin/config`, `/admin/stats`, `/admin/decisions` |
-| Decision export & replay | — | JSONL export + `vllm-router replay` for evidence-based policy comparison |
-| Token ID cache | — | Cache tokenization results for LMCache prefix lookup (~100ms to <1ms) |
-| Shared prefix routing | — | Multi-instance `cache_aware` via shared prefix table (memory/Redis) |
-| OpenTelemetry tracing | — | OTLP distributed tracing with W3C TraceContext propagation |
-| Multi-tenant API keys | — | Per-tenant rate limits, model ACL, SHA-256 hashed keys, hot reload |
-| Grafana dashboard | — | Pre-provisioned 18-panel dashboard + Prometheus + Docker Compose |
+| Feature | Description |
+|---------|-------------|
+| Config file (`--config-file`) | YAML config for all settings |
+| Exact-match response cache | FNV-1a, DashMap, TTL |
+| Semantic similarity cache | Cosine similarity + embeddings endpoint |
+| Semantic cluster routing | Route by prompt content to worker clusters |
+| Anthropic Messages API | `POST /v1/messages` with streaming |
+| Sticky sessions + graceful failover | DashMap TTL + ring walk on failure |
+| vLLM Semantic Router header propagation | `x-semantic-*` headers forwarded to workers |
+| SentencePiece tokenizer | Via system `libsentencepiece` |
+| Model-to-tokenizer mapping | `--tokenizer-model-map` substring match |
+| `POST /v1/completions` (OpenAI backend) | Proxy + streaming SSE |
+| `POST /v1/embeddings` (OpenAI backend) | Proxy |
+| `POST /v1/rerank` (OpenAI backend) | Proxy |
+| gRPC `SessionParams` / `ModelInfo` proto | In `vllm_scheduler.proto` |
+| LMCache-aware routing (`lmcache_aware`) | Real KV cache state from LMCache controller (occupancy + prefix lookup) |
+| Per-routing-decision Prometheus metrics | Worker, cluster, and fallback counters |
+| INFO-level routing logs | Model, worker, method, status, duration |
+| Per-worker API keys | Each backend can have its own `Authorization: Bearer` key |
+| Embeddings endpoint auth | `embeddings_api_key` for semantic cache and cluster routing |
+| Graceful worker drain | `POST /admin/drain` — stop traffic, wait for in-flight, then remove |
+| Hot config reload | `POST /admin/reload` — re-read YAML, swap keys & workers without restart |
+| Routing explainability headers | `x-vllm-router-*` headers on every response (worker, method, policy, cache status) |
+| Model aliasing & fallback | `model_rules` — rewrite model names, wildcard matching, fallback chains |
+| Pre-routing hooks | HTTP callouts to external services for safety, PII, custom validation |
+| Admin state endpoints | `/admin/config`, `/admin/stats`, `/admin/decisions` |
+| Decision export & replay | JSONL export + `vllm-router replay` for evidence-based policy comparison |
+| Token ID cache | Cache tokenization results for LMCache prefix lookup (~100ms to <1ms) |
+| Shared prefix routing | Multi-instance `cache_aware` via shared prefix table (memory/Redis) |
+| OpenTelemetry tracing | OTLP distributed tracing with W3C TraceContext propagation |
+| Multi-tenant API keys | Per-tenant rate limits, model ACL, SHA-256 hashed keys, hot reload |
+| Grafana dashboard | Pre-provisioned 18-panel dashboard + Prometheus + Docker Compose |
 
 ---
 
