@@ -12,6 +12,20 @@ See **[FEATURES.md](FEATURES.md)** for the full comparison table and performance
 
 ---
 
+## Dashboard
+
+![Dashboard UI](ui.png)
+
+Built-in web dashboard for real-time monitoring and management. No Grafana or Prometheus server required.
+
+```bash
+cd ui && npm install && npm run dev
+```
+
+See **[docs/dashboard.md](docs/dashboard.md)** for full documentation.
+
+---
+
 ## Observability
 
 The router ships with a complete monitoring stack:
