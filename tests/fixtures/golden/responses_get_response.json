@@ -1,0 +1,13 @@
+{
+  "id": "resp-{id}",
+  "object": "response",
+  "created_at": 0,
+  "model": "mock-model",
+  "output": [],
+  "status": "completed",
+  "usage": {
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "total_tokens": 0
+  }
+}

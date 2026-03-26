@@ -355,6 +355,10 @@ async fn v1_responses(
         Ok(t) => t,
         Err(response) => return response,
     };
+    let model = body.get("model").and_then(|v| v.as_str());
+    if let Err(response) = check_tenant_model_access(&tenant, model) {
+        return response;
+    }
     inject_tenant(&mut headers, &tenant);
 
     state
@@ -399,6 +403,9 @@ async fn v1_messages(
         Ok(t) => t,
         Err(response) => return response,
     };
+    if let Err(response) = check_tenant_model_access(&tenant, Some(&body.model)) {
+        return response;
+    }
     inject_tenant(&mut headers, &tenant);
 
     let original_model = body.model.clone();

@@ -1,0 +1,15 @@
+{
+  "id": "chatcmpl-{uuid}",
+  "object": "chat.completion.chunk",
+  "created": 0,
+  "model": "mock-model",
+  "choices": [
+    {
+      "index": 0,
+      "delta": {
+        "content": "This is a mock chat response."
+      },
+      "finish_reason": null
+    }
+  ]
+}

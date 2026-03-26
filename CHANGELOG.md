@@ -5,6 +5,14 @@ Upstream: [vllm-project/router](https://github.com/vllm-project/router) | Fork: 
 
 ---
 
+## [0.10.0] — 2026-03-26
+
+### Added
+- **Golden tests for public API routes** — baseline integration tests covering `POST /v1/chat/completions` (non-stream + stream), `POST /v1/messages` (non-stream + stream), `POST /v1/responses`, `GET /v1/responses/{id}`, and `POST /v1/responses/{id}/cancel`. Uses mock workers + `tower::ServiceExt::oneshot` to validate response structure and key fields. Fixture files in `tests/fixtures/golden/`.
+- **Tenant model access checks for `/v1/messages` and `/v1/responses`** — both endpoints now enforce `check_tenant_model_access` before routing, matching the existing behavior of `/v1/chat/completions`, `/v1/completions`, and `/v1/embeddings`. Previously these two routes skipped the check, allowing tenants with restricted `allowed_models` to bypass model access control.
+
+---
+
 ## [0.9.1] — 2026-03-25
 
 ### Added
