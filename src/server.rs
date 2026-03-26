@@ -1383,6 +1383,49 @@ async fn delete_worker(
     }
 }
 
+/// GET /workers/{url}/metrics — proxy the worker's Prometheus /metrics endpoint
+async fn get_worker_metrics(
+    State(state): State<Arc<AppState>>,
+    Path(url): Path<String>,
+    headers: http::HeaderMap,
+) -> Response {
+    if let Err(response) = authorize_admin_request(&state, &headers).await {
+        return response;
+    }
+
+    // Verify the worker exists
+    let worker_urls = state.router.get_worker_urls();
+    if !worker_urls.contains(&url) {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": format!("Worker {} not found", url) })),
+        )
+            .into_response();
+    }
+
+    // Fetch /metrics from the worker
+    let metrics_url = format!("{}/metrics", url.trim_end_matches('/'));
+    match state.context.client.get(&metrics_url).timeout(Duration::from_secs(5)).send().await {
+        Ok(res) => {
+            let status = StatusCode::from_u16(res.status().as_u16())
+                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            let body = res.text().await.unwrap_or_default();
+            let mut resp = Response::new(Body::from(body));
+            *resp.status_mut() = status;
+            resp.headers_mut().insert(
+                http::header::CONTENT_TYPE,
+                http::HeaderValue::from_static("text/plain; charset=utf-8"),
+            );
+            resp
+        }
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({ "error": format!("Failed to fetch worker metrics: {}", e) })),
+        )
+            .into_response(),
+    }
+}
+
 pub struct ServerConfig {
     pub host: String,
     pub port: u16,
@@ -1483,7 +1526,8 @@ pub fn build_app_with_request_tracing(
         .route("/workers", post(create_worker))
         .route("/workers", get(list_workers_rest))
         .route("/workers/{url}", get(get_worker))
-        .route("/workers/{url}", delete(delete_worker));
+        .route("/workers/{url}", delete(delete_worker))
+        .route("/workers/{url}/metrics", get(get_worker_metrics));
 
     // Build base app with all routes and middleware
     let base_app = Router::new()

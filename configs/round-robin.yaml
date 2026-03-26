@@ -10,45 +10,60 @@ host: "0.0.0.0"
 port: 3000
 log_level: info
 
-# Optional: protect /admin/* endpoints with a static API key.
-# admin_api_key: "my-secret-admin-key"
+# Protect /admin/* endpoints with a static API key.
+admin_api_key: "my-secret-admin-key"
 
 # Multi-tenant API keys (per-tenant rate limits and model access control)
 # See docs/authentication.md for details.
-# api_keys:
-#   - key: "sk-team-ml-xxxxx"
-#     name: "ml-team"
-#     rate_limit_rps: 100
-#     max_concurrent: 50
-#     allowed_models: ["*"]
-#   - key: "sk-team-backend-yyyyy"
-#     name: "backend-team"
-#     rate_limit_rps: 50
-#     max_concurrent: 20
-#     allowed_models: ["Llama-3*"]
+api_keys:
+    - key: "my-secret-admin-key"
+      name: "admin"
+      rate_limit_rps: 1000
+      max_concurrent: 100
+      allowed_models: ["*"]
+    - key: "sk-team-ml-xxxxx"
+      name: "ml-team"
+      rate_limit_rps: 100
+      max_concurrent: 50
+      allowed_models: ["*"]
+    - key: "sk-team-backend-yyyyy"
+      name: "backend-team"
+      rate_limit_rps: 50
+      max_concurrent: 20
+      allowed_models: ["Llama-3*"]
 
 mode:
-  type: regular
-  worker_urls:
-    - "http://localhost:8010"
-    - "http://localhost:8020"
+    type: regular
+    worker_urls:
+        - "http://localhost:8010"
+        - "http://localhost:8020"
 
 policy:
-  type: round_robin
+    type: round_robin
 
 # Prometheus metrics endpoint (default: 127.0.0.1:29000)
 metrics:
-  host: "0.0.0.0"
-  port: 29000
+    host: "0.0.0.0"
+    port: 29000
 
 # Health checks for backend workers
 health_check:
-  check_interval_secs: 60
-  timeout_secs: 5
-  failure_threshold: 3
-  success_threshold: 2
-  endpoint: /health
+    check_interval_secs: 60
+    timeout_secs: 5
+    failure_threshold: 3
+    success_threshold: 2
+    endpoint: /health
 
+cache:
+    backend: redis # "memory" (default) or "redis"
+    max_entries: 2048 # exact-match cache capacity (default: 1024)
+    ttl_secs: 120 # time-to-live per entry (default: 60)
+    redis:
+        url: "redis://127.0.0.1:6379/0"
+        pool_size: 8
+        key_prefix: "vllm-router:"
+        connection_timeout_ms: 3000
+        command_timeout_ms: 500
 # ---------------------------------------------------------------------------
 # Optional features (see docs/configuration.md for details)
 # ---------------------------------------------------------------------------

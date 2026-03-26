@@ -14,7 +14,7 @@
 
 set -e
 
-VENV="/home/alberto/Projects/vllm-dist"
+VENV="/home/alberto/vllm-dist"
 CHAT_MODEL="RedHatAI/Llama-3.2-1B-Instruct-FP8"
 EMBED_MODEL="BAAI/bge-small-en-v1.5"
 GPU_MEMORY_UTIL=0.5
