@@ -34,6 +34,9 @@ Everything below is added by this fork. The [upstream router](https://github.com
 | OpenTelemetry tracing | OTLP distributed tracing with W3C TraceContext propagation |
 | Multi-tenant API keys | Per-tenant rate limits, model ACL, SHA-256 hashed keys, hot reload |
 | Grafana dashboard | Pre-provisioned 18-panel dashboard + Prometheus + Docker Compose |
+| Web dashboard UI | React + TypeScript real-time dashboard — no Grafana needed ([docs](docs/dashboard.md)) |
+| Worker metrics proxy | `GET /workers/{url}/metrics` — vLLM Prometheus metrics proxied through admin auth |
+| Tenant model access on all routes | `/v1/messages` and `/v1/responses` enforce `allowed_models` like `/v1/chat/completions` |
 
 ---
 
