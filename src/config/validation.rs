@@ -76,9 +76,11 @@ impl ConfigValidator {
                     let prefill_url_strings: Vec<String> =
                         prefill_urls.iter().map(|(url, _)| url.clone()).collect();
                     Self::validate_urls(&prefill_url_strings)?;
+                    Self::reject_unix_socket_urls(&prefill_url_strings, "pd_disaggregation")?;
                 }
                 if !decode_urls.is_empty() {
                     Self::validate_urls(decode_urls)?;
+                    Self::reject_unix_socket_urls(decode_urls, "pd_disaggregation")?;
                 }
 
                 // Validate bootstrap ports
@@ -130,9 +132,11 @@ impl ConfigValidator {
                     let prefill_url_strings: Vec<String> =
                         prefill_urls.iter().map(|(url, _)| url.clone()).collect();
                     Self::validate_urls(&prefill_url_strings)?;
+                    Self::reject_unix_socket_urls(&prefill_url_strings, "vllm_pd")?;
                 }
                 if !decode_urls.is_empty() {
                     Self::validate_urls(decode_urls)?;
+                    Self::reject_unix_socket_urls(decode_urls, "vllm_pd")?;
                 }
 
                 // Validate bootstrap ports
@@ -541,44 +545,33 @@ impl ConfigValidator {
     /// Validate URL format
     fn validate_urls(urls: &[String]) -> ConfigResult<()> {
         for url in urls {
-            if url.is_empty() {
+            if let Err(reason) = crate::transport::validate_worker_url(url) {
                 return Err(ConfigError::InvalidValue {
                     field: "worker_url".to_string(),
                     value: url.clone(),
-                    reason: "URL cannot be empty".to_string(),
+                    reason,
                 });
             }
+        }
+        Ok(())
+    }
 
-            if !url.starts_with("http://")
-                && !url.starts_with("https://")
-                && !url.starts_with("grpc://")
-            {
-                return Err(ConfigError::InvalidValue {
-                    field: "worker_url".to_string(),
-                    value: url.clone(),
-                    reason: "URL must start with http://, https://, or grpc://".to_string(),
+    /// Reject Unix socket URLs in PD modes. KV cache transfer between prefill
+    /// and decode workers uses a P2P TCP channel (ZMQ/NIXL) whose address is
+    /// embedded as host:port in the request body and X-Request-Id header.
+    /// A Unix socket path has no meaning as a P2P rendezvous address.
+    fn reject_unix_socket_urls(urls: &[String], mode_name: &str) -> ConfigResult<()> {
+        for url in urls {
+            if crate::transport::is_unix_socket_url(url) {
+                return Err(ConfigError::ValidationFailed {
+                    reason: format!(
+                        "Unix socket workers are not supported in {} mode. \
+                         KV cache transfer between prefill and decode workers requires \
+                         TCP host:port addresses. See docs/unix-sockets.md for details. \
+                         Offending URL: {}",
+                        mode_name, url
+                    ),
                 });
-            }
-
-            // Basic URL validation
-            match ::url::Url::parse(url) {
-                Ok(parsed) => {
-                    // Additional validation
-                    if parsed.host_str().is_none() {
-                        return Err(ConfigError::InvalidValue {
-                            field: "worker_url".to_string(),
-                            value: url.clone(),
-                            reason: "URL must have a valid host".to_string(),
-                        });
-                    }
-                }
-                Err(e) => {
-                    return Err(ConfigError::InvalidValue {
-                        field: "worker_url".to_string(),
-                        value: url.clone(),
-                        reason: format!("Invalid URL format: {}", e),
-                    });
-                }
             }
         }
         Ok(())
@@ -872,5 +865,84 @@ mod tests {
 
         let result = ConfigValidator::validate(&config);
         assert!(result.is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_validate_unix_socket_allowed_in_regular_mode() {
+        let config = RouterConfig::new(
+            RoutingMode::Regular {
+                worker_urls: vec!["unix:///tmp/vllm.sock".to_string()],
+            },
+            PolicyConfig::RoundRobin,
+        );
+        assert!(ConfigValidator::validate(&config).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_validate_unix_socket_rejected_in_pd_mode() {
+        let config = RouterConfig::new(
+            RoutingMode::PrefillDecode {
+                prefill_urls: vec![("unix:///tmp/prefill.sock".to_string(), None)],
+                decode_urls: vec!["http://decode:8000".to_string()],
+                prefill_policy: None,
+                decode_policy: None,
+            },
+            PolicyConfig::RoundRobin,
+        );
+        let result = ConfigValidator::validate(&config);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("Unix socket workers are not supported in pd_disaggregation mode"),
+            "Expected PD UDS rejection, got: {}",
+            err
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_validate_unix_socket_rejected_in_pd_decode_urls() {
+        let config = RouterConfig::new(
+            RoutingMode::PrefillDecode {
+                prefill_urls: vec![("http://prefill:8000".to_string(), None)],
+                decode_urls: vec!["unix:///tmp/decode.sock".to_string()],
+                prefill_policy: None,
+                decode_policy: None,
+            },
+            PolicyConfig::RoundRobin,
+        );
+        let result = ConfigValidator::validate(&config);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("Unix socket workers are not supported in pd_disaggregation mode"),
+            "Expected PD UDS rejection, got: {}",
+            err
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_validate_unix_socket_rejected_in_vllm_pd_mode() {
+        let config = RouterConfig::new(
+            RoutingMode::VllmPrefillDecode {
+                prefill_urls: vec![("unix:///tmp/prefill.sock".to_string(), None)],
+                decode_urls: vec!["http://decode:8000".to_string()],
+                prefill_policy: None,
+                decode_policy: None,
+                discovery_address: None,
+            },
+            PolicyConfig::RoundRobin,
+        );
+        let result = ConfigValidator::validate(&config);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("Unix socket workers are not supported in vllm_pd mode"),
+            "Expected vLLM PD UDS rejection, got: {}",
+            err
+        );
     }
 }

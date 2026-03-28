@@ -1,0 +1,27 @@
+# Unix Domain Socket routing
+#
+# Connect to a local vLLM instance over a Unix socket instead of TCP.
+# Avoids local TCP overhead and port exposure for same-host deployments.
+#
+# Start vLLM:
+#   vllm serve meta-llama/Llama-3.1-8B-Instruct --uds /tmp/vllm.sock
+#
+# Start router:
+#   vllm-router --config-file configs/unix-socket.yaml
+
+host: "0.0.0.0"
+port: 3000
+log_level: info
+
+mode:
+    type: regular
+    worker_urls:
+        - "unix:///tmp/vllm.sock"
+
+policy:
+    type: round_robin
+
+health_check:
+    check_interval_secs: 30
+    timeout_secs: 3
+    endpoint: /health

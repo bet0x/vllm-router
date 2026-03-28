@@ -37,12 +37,15 @@ impl OpenAIRouter {
         base_url: String,
         circuit_breaker_config: Option<CircuitBreakerConfig>,
     ) -> Result<Self, String> {
-        let client = reqwest::Client::builder()
+        let base_url = base_url.trim_end_matches('/').to_string();
+
+        // Resolve the HTTP client: UDS workers get a per-socket client,
+        // TCP workers get a standard client with a long timeout for inference.
+        let tcp_fallback = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(300))
             .build()
             .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
-
-        let base_url = base_url.trim_end_matches('/').to_string();
+        let client = crate::transport::resolve_client(&base_url, &tcp_fallback)?;
 
         // Convert circuit breaker config
         let core_cb_config = circuit_breaker_config
@@ -88,7 +91,7 @@ impl super::super::RouterTrait for OpenAIRouter {
 
     async fn health(&self, _req: Request<Body>) -> Response {
         // Simple upstream probe: GET {base}/v1/models without auth
-        let url = format!("{}/v1/models", self.base_url);
+        let url = crate::transport::request_url(&self.base_url, "/v1/models");
         match self
             .client
             .get(&url)
@@ -135,7 +138,7 @@ impl super::super::RouterTrait for OpenAIRouter {
         // Proxy to upstream /v1/models; forward Authorization header if provided
         let headers = req.headers();
 
-        let mut upstream = self.client.get(format!("{}/v1/models", self.base_url));
+        let mut upstream = self.client.get(crate::transport::request_url(&self.base_url, "/v1/models"));
 
         if let Some(auth) = headers
             .get("authorization")
@@ -241,7 +244,7 @@ impl super::super::RouterTrait for OpenAIRouter {
             }
         }
 
-        let url = format!("{}/v1/chat/completions", self.base_url);
+        let url = crate::transport::request_url(&self.base_url, "/v1/chat/completions");
         let mut req = self.client.post(&url).json(&payload);
 
         // Forward Authorization header if provided
@@ -366,7 +369,7 @@ impl super::super::RouterTrait for OpenAIRouter {
             }
         }
 
-        let url = format!("{}/v1/completions", self.base_url);
+        let url = crate::transport::request_url(&self.base_url, "/v1/completions");
         let mut req = self.client.post(&url).json(&payload);
 
         if let Some(h) = headers {
@@ -530,7 +533,7 @@ impl super::super::RouterTrait for OpenAIRouter {
             }
         }
 
-        let url = format!("{}/v1/embeddings", self.base_url);
+        let url = crate::transport::request_url(&self.base_url, "/v1/embeddings");
         let mut req = self.client.post(&url).json(&payload);
 
         if let Some(h) = headers {
@@ -609,7 +612,7 @@ impl super::super::RouterTrait for OpenAIRouter {
             }
         }
 
-        let url = format!("{}/v1/rerank", self.base_url);
+        let url = crate::transport::request_url(&self.base_url, "/v1/rerank");
         let mut req = self.client.post(&url).json(&payload);
 
         if let Some(h) = headers {

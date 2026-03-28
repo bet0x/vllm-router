@@ -845,14 +845,16 @@ impl Router {
     ///   2. /v1/models        — standard vLLM (OpenAI-compatible)
     /// Returns "unknown" if both fail or neither contains a model ID.
     async fn fetch_model_id_from_server(
-        client: &reqwest::Client,
+        tcp_client: &reqwest::Client,
         url: &str,
         api_key: Option<&str>,
     ) -> String {
         let base = url.trim_end_matches('/');
+        let client = crate::transport::resolve_client(base, tcp_client)
+            .unwrap_or_else(|_| tcp_client.clone());
 
         // 1. Try /get_server_info (llm-d / SGLang)
-        let info_url = format!("{}/get_server_info", base);
+        let info_url = crate::transport::request_url(base, "/get_server_info");
         let mut req = client.get(&info_url).timeout(Duration::from_secs(5));
         if let Some(key) = api_key {
             req = req.bearer_auth(key);
@@ -879,7 +881,7 @@ impl Router {
         }
 
         // 2. Fall back to /v1/models (standard vLLM)
-        let models_url = format!("{}/v1/models", base);
+        let models_url = crate::transport::request_url(base, "/v1/models");
         let mut req = client.get(&models_url).timeout(Duration::from_secs(5));
         if let Some(key) = api_key {
             req = req.bearer_auth(key);
@@ -976,7 +978,9 @@ impl Router {
         );
 
         let start_time = std::time::Instant::now();
-        let client = reqwest::Client::builder()
+        // TCP fallback client for startup health polling; UDS workers resolve
+        // their own per-socket client via transport::resolve_client().
+        let tcp_client = reqwest::Client::builder()
             .timeout(Duration::from_secs(2))
             .build()
             .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
@@ -996,11 +1000,12 @@ impl Router {
             // Perform health checks only on unique hosts (not per DP rank)
             let mut health_checks = Vec::new();
             for base_url in &unique_hosts_vec {
-                let client_clone = client.clone();
+                let client_clone = crate::transport::resolve_client(base_url, &tcp_client)
+                    .unwrap_or_else(|_| tcp_client.clone());
                 let url_clone = base_url.clone();
 
                 let check_health = tokio::spawn(async move {
-                    let health_url = format!("{}/health", url_clone);
+                    let health_url = crate::transport::request_url(&url_clone, "/health");
                     match client_clone.get(&health_url).send().await {
                         Ok(res) => {
                             if res.status().is_success() {
@@ -1100,7 +1105,9 @@ impl Router {
             worker_url
         };
 
-        let request_builder = self.client.get(format!("{}/health", health_url));
+        let client = crate::transport::resolve_client(health_url, &self.client)
+            .unwrap_or_else(|_| self.client.clone());
+        let request_builder = client.get(crate::transport::request_url(health_url, "/health"));
 
         let response = match request_builder.send().await {
             Ok(res) => {
@@ -1147,7 +1154,9 @@ impl Router {
 
         match self.select_first_worker() {
             Ok(worker_url) => {
-                let mut request_builder = self.client.get(format!("{}/{}", worker_url, endpoint));
+                let client = crate::transport::resolve_client(&worker_url, &self.client)
+                    .unwrap_or_else(|_| self.client.clone());
+                let mut request_builder = client.get(crate::transport::request_url(&worker_url, &format!("/{}", endpoint)));
                 for (name, value) in headers {
                     let name_lc = name.to_lowercase();
                     if name_lc != "content-type" && name_lc != "content-length" {
@@ -1919,10 +1928,12 @@ impl Router {
         for worker_url in worker_urls {
             let base = self.worker_base_url(&worker_url);
 
-            let url = format!("{}/{}", base, endpoint);
+            let url = crate::transport::request_url(&base, &format!("/{}", endpoint));
+            let client = crate::transport::resolve_client(&worker_url, &self.client)
+                .unwrap_or_else(|_| self.client.clone());
             let mut request_builder = match method {
-                Method::GET => self.client.get(url),
-                Method::POST => self.client.post(url),
+                Method::GET => client.get(url),
+                Method::POST => client.post(url),
                 _ => {
                     return (
                         StatusCode::METHOD_NOT_ALLOWED,
@@ -2035,17 +2046,22 @@ impl Router {
             };
 
             // Use the original json_val without modification
+            let client = crate::transport::resolve_client(worker_url_prefix, &self.client)
+                .unwrap_or_else(|_| self.client.clone());
 
             (
-                self.client
-                    .post(format!("{}{}", worker_url_prefix, route))
+                client
+                    .post(crate::transport::request_url(worker_url_prefix, route))
                     .json(&json_val),
                 Some(dp_rank),
             )
         } else {
+            let client = crate::transport::resolve_client(worker_url, &self.client)
+                .unwrap_or_else(|_| self.client.clone());
+
             (
-                self.client
-                    .post(format!("{}{}", worker_url, route))
+                client
+                    .post(crate::transport::request_url(worker_url, route))
                     .json(typed_req),
                 None,
             ) // Use json() directly with typed request
@@ -2243,10 +2259,7 @@ impl Router {
 
     pub async fn add_worker(&self, worker_url: &str) -> Result<String, String> {
         let start_time = std::time::Instant::now();
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(self.worker_startup_timeout_secs))
-            .build()
-            .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+        let client = crate::transport::client_for_worker_url(worker_url)?;
 
         loop {
             if start_time.elapsed() > Duration::from_secs(self.worker_startup_timeout_secs) {
@@ -2260,7 +2273,7 @@ impl Router {
                 ));
             }
 
-            match client.get(format!("{}/health", worker_url)).send().await {
+            match client.get(crate::transport::request_url(worker_url, "/health")).send().await {
                 Ok(res) => {
                     if res.status().is_success() {
                         if self.intra_node_data_parallel_size > 1 {
@@ -2510,9 +2523,10 @@ impl Router {
             worker_url
         };
 
-        match self
-            .client
-            .get(format!("{}/get_load", worker_url))
+        let client = crate::transport::resolve_client(worker_url, &self.client)
+            .unwrap_or_else(|_| self.client.clone());
+        match client
+            .get(crate::transport::request_url(worker_url, "/get_load"))
             .send()
             .await
         {
@@ -2595,7 +2609,9 @@ impl Router {
             worker_url
         };
 
-        match client.get(format!("{}/get_load", worker_url)).send().await {
+        let resolved = crate::transport::resolve_client(worker_url, client)
+            .unwrap_or_else(|_| client.clone());
+        match resolved.get(crate::transport::request_url(worker_url, "/get_load")).send().await {
             Ok(res) if res.status().is_success() => match res.bytes().await {
                 Ok(bytes) => match serde_json::from_slice::<serde_json::Value>(&bytes) {
                     Ok(data) => data
@@ -2697,9 +2713,11 @@ impl Router {
             .map(|worker_url| {
                 let worker_api_keys = &worker_api_keys;
                 async move {
-                let url = format!("{}/v1/models", worker_url.trim_end_matches('/'));
+                let url = crate::transport::request_url(&worker_url, "/v1/models");
                 let base_url = worker_url.split('@').next().unwrap_or(&worker_url);
-                let mut req = client.get(&url);
+                let resolved = crate::transport::resolve_client(&worker_url, client)
+                    .unwrap_or_else(|_| client.clone());
+                let mut req = resolved.get(&url);
                 if let Some(key) = worker_api_keys.get(base_url) {
                     req = req.bearer_auth(key);
                 }
@@ -2955,7 +2973,9 @@ impl RouterTrait for Router {
             } else {
                 worker_url
             };
-            let request_builder = self.client.post(format!("{}/flush_cache", worker_url));
+            let client = crate::transport::resolve_client(worker_url, &self.client)
+                .unwrap_or_else(|_| self.client.clone());
+            let request_builder = client.post(crate::transport::request_url(worker_url, "/flush_cache"));
             tasks.push(request_builder.send());
         }
 
@@ -3075,17 +3095,19 @@ impl RouterTrait for Router {
 
         let worker: &dyn Worker = workers[worker_idx].as_ref();
         let url = worker.endpoint_url(path);
+        let client = crate::transport::resolve_client(worker.url(), &self.client)
+            .unwrap_or_else(|_| self.client.clone());
 
         debug!("Transparent proxy: forwarding to {}", url);
 
         // Build the request
         let mut request_builder = match *method {
-            Method::GET => self.client.get(&url),
-            Method::POST => self.client.post(&url),
-            Method::PUT => self.client.put(&url),
-            Method::DELETE => self.client.delete(&url),
-            Method::PATCH => self.client.patch(&url),
-            Method::HEAD => self.client.head(&url),
+            Method::GET => client.get(&url),
+            Method::POST => client.post(&url),
+            Method::PUT => client.put(&url),
+            Method::DELETE => client.delete(&url),
+            Method::PATCH => client.patch(&url),
+            Method::HEAD => client.head(&url),
             _ => {
                 return (
                     StatusCode::METHOD_NOT_ALLOWED,

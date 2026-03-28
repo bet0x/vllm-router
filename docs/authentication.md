@@ -94,10 +94,11 @@ For multi-model or multi-provider deployments where each backend has its own cre
 worker_api_keys:
   "http://node1:8080": "sk-node1-secret"
   "http://node2:8080": "sk-node2-secret"
+  "unix:///tmp/vllm.sock": "sk-local-secret"   # UDS workers use the full unix:// URL
   # node3 has no entry → falls back to api_key global
 ```
 
-The lookup key must match the worker URL exactly as declared in `worker_urls` / `prefill_urls` / `decode_urls`.
+The lookup key must match the worker URL exactly as declared in `worker_urls` / `prefill_urls` / `decode_urls`. For Unix socket workers, this is the full `unix:///path.sock` string.
 
 ### Priority order
 

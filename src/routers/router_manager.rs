@@ -339,8 +339,10 @@ impl RouterManager {
         let base = url.trim_end_matches('/');
 
         // 1. Try /get_server_info (llm-d / SGLang)
-        let info_url = format!("{}/get_server_info", base);
-        if let Ok(response) = self.client.get(&info_url).send().await {
+        let client = crate::transport::resolve_client(base, &self.client)
+            .unwrap_or_else(|_| self.client.clone());
+        let info_url = crate::transport::request_url(base, "/get_server_info");
+        if let Ok(response) = client.get(&info_url).send().await {
             if response.status().is_success() {
                 return response
                     .json::<ServerInfo>()
@@ -350,8 +352,8 @@ impl RouterManager {
         }
 
         // 2. Fall back to /v1/models (standard vLLM)
-        let models_url = format!("{}/v1/models", base);
-        match self.client.get(&models_url).send().await {
+        let models_url = crate::transport::request_url(base, "/v1/models");
+        match client.get(&models_url).send().await {
             Ok(response) if response.status().is_success() => {
                 let json = response
                     .json::<serde_json::Value>()
@@ -522,8 +524,10 @@ impl RouterManager {
         let futures: Vec<_> = worker_urls
             .into_iter()
             .map(|worker_url| async move {
-                let url = format!("{}/v1/models", worker_url.trim_end_matches('/'));
-                match client.get(&url).send().await {
+                let url = crate::transport::request_url(&worker_url, "/v1/models");
+                let resolved = crate::transport::resolve_client(&worker_url, client)
+                    .unwrap_or_else(|_| client.clone());
+                match resolved.get(&url).send().await {
                     Ok(res) => {
                         if res.status().is_success() {
                             match res.json::<serde_json::Value>().await {

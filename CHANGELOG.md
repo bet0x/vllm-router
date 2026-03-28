@@ -5,6 +5,16 @@ Upstream: [vllm-project/router](https://github.com/vllm-project/router) | Fork: 
 
 ---
 
+## [0.11.0] — 2026-03-27
+
+### Added
+- **Unix domain socket backend support** — connect to local vLLM workers via `unix:///path.sock` instead of TCP. Eliminates local TCP overhead and port exposure for same-host deployments. Works with all regular routing features: health checks, model discovery, chat/completions/embeddings/rerank, streaming, caching, all load balancing policies, session affinity, per-worker API keys, and admin APIs. See [docs/unix-sockets.md](docs/unix-sockets.md).
+- **Transport-aware HTTP client pool** (`src/transport.rs`) — `resolve_client()` returns the caller's pool-tuned TCP client for `http(s)://` workers or a cached per-socket `reqwest::Client` for `unix://` workers. `request_url()` maps worker URLs to the correct HTTP request URL (TCP: standard join, UDS: `http://localhost` authority).
+- **Config validation rejects UDS in PD modes** — `unix://` worker URLs in `pd_disaggregation` or `vllm_pd` modes produce a clear error at startup explaining that KV cache transfer requires TCP `host:port` addresses.
+- Example configs: `configs/unix-socket.yaml`, `configs/mixed-tcp-and-unix.yaml`.
+
+---
+
 ## [0.10.0] — 2026-03-26
 
 ### Added

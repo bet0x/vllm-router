@@ -255,6 +255,9 @@ curl -H 'Authorization: Bearer my-secret-admin-key' \
 
 # 3. After maintenance, add worker back
 curl -X POST 'http://router:3001/add_worker?url=http://gpu-node1:8080'
+
+# Unix socket workers use url-encoded unix:// URLs
+curl -X POST 'http://router:3001/add_worker?url=unix:///tmp/vllm.sock'
 ```
 
 ### Rotating API keys

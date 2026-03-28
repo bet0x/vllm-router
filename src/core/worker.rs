@@ -6,16 +6,12 @@ use futures;
 use serde_json;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, LazyLock};
+use std::sync::Arc;
 use tokio::sync::Mutex;
 
-// Shared HTTP client for worker operations (health checks, server info, etc.)
-static WORKER_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
-    reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30)) // Default timeout, overridden per request
-        .build()
-        .expect("Failed to create worker HTTP client")
-});
+// NOTE: Background health checks and standalone worker HTTP calls now use
+// `crate::transport::client_for_worker_url()` which returns a shared TCP
+// client for http(s):// URLs or a cached per-socket client for unix:// URLs.
 
 /// Core worker abstraction that represents a backend service
 #[async_trait]
@@ -151,9 +147,11 @@ pub trait Worker: Send + Sync + fmt::Debug {
         Ok(req)
     }
 
-    /// Get the actual endpoint URL for requests
+    /// Get the actual endpoint URL for requests.
+    /// For TCP workers: `"{base_url}{route}"`.
+    /// For UDS workers: `"http://localhost{route}"`.
     fn endpoint_url(&self, route: &str) -> String {
-        format!("{}{}", self.base_url(), route)
+        crate::transport::request_url(self.base_url(), route)
     }
 
     /// Check if this worker can handle a specific request
@@ -465,13 +463,24 @@ impl Worker for BasicWorker {
 
         let health_result = match &self.metadata.connection_mode {
             ConnectionMode::Http => {
-                // Perform HTTP health check
+                // Perform HTTP health check (UDS-aware)
                 let url = self.normalised_url()?;
-                let health_url = format!("{}{}", url, self.metadata.health_config.endpoint);
+                let health_url =
+                    crate::transport::request_url(url, &self.metadata.health_config.endpoint);
                 let timeout = Duration::from_secs(self.metadata.health_config.timeout_secs);
 
-                // Use the shared client with a custom timeout for this request
-                match WORKER_CLIENT.get(&health_url).timeout(timeout).send().await {
+                let client = match crate::transport::client_for_worker_url(url) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        tracing::warn!(worker = %self.metadata.url, error = %e, "Failed to resolve HTTP client for health check");
+                        return Err(WorkerError::HealthCheckFailed {
+                            url: self.metadata.url.clone(),
+                            reason: e,
+                        });
+                    }
+                };
+
+                match client.get(&health_url).timeout(timeout).send().await {
                     Ok(response) => response.status().is_success(),
                     Err(_) => false,
                 }

@@ -99,6 +99,34 @@ shared_prefix_routing:         # optional (multi-instance cache-aware)
 
 See individual files in `configs/` for per-policy documentation and inline comments.
 
+## Worker endpoint transports
+
+Worker backends can be configured using standard HTTP URLs or Unix domain sockets.
+
+Supported forms:
+
+| Format | Transport | Example |
+|--------|-----------|---------|
+| `http://host:port` | TCP | `http://worker1:8000` |
+| `https://host:port` | TCP+TLS | `https://worker1:8000` |
+| `unix:///absolute/path.sock` | Unix domain socket | `unix:///tmp/vllm.sock` |
+
+Unix sockets are useful for same-host deployments that avoid local TCP overhead and port exposure. Start vLLM with `--uds /path.sock` and reference it in config:
+
+```yaml
+mode:
+  type: regular
+  worker_urls:
+    - "unix:///tmp/vllm.sock"
+    - "http://remote-worker:8000"   # mixing is fine
+```
+
+The router speaks standard HTTP over the socket. Only the transport changes; all routing policies, caching, health checks, and auth work identically.
+
+Unix socket support is available for `regular` and `openai` routing modes. PD disaggregation modes require TCP workers. Unix sockets are only supported on Unix platforms (Linux, macOS).
+
+See [unix-sockets.md](unix-sockets.md) for the full guide including deployment patterns and troubleshooting.
+
 ## Authentication
 
 ### Inbound (client → router)
@@ -131,6 +159,7 @@ api_key: "sk-global-secret"
 worker_api_keys:
   "http://node1:8080": "sk-node1-secret"
   "http://node2:8080": "sk-node2-secret"
+  "unix:///tmp/vllm.sock": "sk-local-secret"   # UDS workers use the full unix:// URL as key
 ```
 
 Priority for outbound auth: `worker_api_keys` → `api_key` → `OPENAI_API_KEY` env var.

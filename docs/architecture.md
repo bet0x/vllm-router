@@ -5,7 +5,8 @@
 The vLLM Router is a **request-level load balancer** for vLLM deployments. It decides which worker handles each request and optionally caches responses to avoid redundant inference.
 
 ```
-Clients → Router → vLLM Workers (GPU inference)
+Clients → Router ─── TCP ──→ vLLM Workers (remote GPU inference)
+                 └── UDS ──→ vLLM Worker  (same-host, no TCP overhead)
 ```
 
 ### Router responsibilities

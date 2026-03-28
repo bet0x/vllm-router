@@ -1403,9 +1403,11 @@ async fn get_worker_metrics(
             .into_response();
     }
 
-    // Fetch /metrics from the worker
-    let metrics_url = format!("{}/metrics", url.trim_end_matches('/'));
-    match state.context.client.get(&metrics_url).timeout(Duration::from_secs(5)).send().await {
+    // Fetch /metrics from the worker (UDS-aware)
+    let metrics_url = crate::transport::request_url(&url, "/metrics");
+    let client = crate::transport::resolve_client(&url, &state.context.client)
+        .unwrap_or_else(|_| state.context.client.clone());
+    match client.get(&metrics_url).timeout(Duration::from_secs(5)).send().await {
         Ok(res) => {
             let status = StatusCode::from_u16(res.status().as_u16())
                 .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);

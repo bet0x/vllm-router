@@ -1,0 +1,36 @@
+# Mixed TCP and Unix socket routing
+#
+# Routes requests across a local UDS worker and a remote TCP worker.
+# The routing policy treats both transports identically.
+#
+# Start local vLLM on a Unix socket:
+#   vllm serve meta-llama/Llama-3.1-8B-Instruct --uds /tmp/vllm.sock
+#
+# Remote worker:
+#   vllm serve meta-llama/Llama-3.1-8B-Instruct --host 0.0.0.0 --port 8000
+#
+# Start router:
+#   vllm-router --config-file configs/mixed-tcp-and-unix.yaml
+
+host: "0.0.0.0"
+port: 3000
+log_level: info
+
+mode:
+    type: regular
+    worker_urls:
+        - "unix:///tmp/vllm.sock"
+        - "http://gpu-node-2:8000"
+
+policy:
+    type: round_robin
+
+# Per-worker authentication (optional)
+worker_api_keys:
+    "unix:///tmp/vllm.sock": "sk-local-vllm"
+    "http://gpu-node-2:8000": "sk-remote"
+
+health_check:
+    check_interval_secs: 30
+    timeout_secs: 3
+    endpoint: /health
